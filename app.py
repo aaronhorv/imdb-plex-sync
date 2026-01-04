@@ -289,26 +289,30 @@ def search_plex_by_title(title, year, plex_token):
             'Accept': 'application/json'
         }
         
-        # Use the correct search endpoint
         search_url = "https://discover.provider.plex.tv/library/search"
         
-        # Try with year first
         search_query = f"{title} {year}" if year else title
         params = {
             'query': search_query,
             'limit': 10,
             'searchTypes': 'movies,tv',
-            'includeMetadata': 1
+            'includeMetadata': 1,
+            'searchProviders': 'discover,plexAVOD'  # <-- ADD THIS LINE
         }
         
         response = requests.get(search_url, headers=headers, params=params, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
-            metadata_list = data.get('MediaContainer', {}).get('Metadata', [])
             
-            if metadata_list:
-                return metadata_list[0].get('ratingKey')
+            # Parse the nested SearchResults structure
+            search_results = data.get('MediaContainer', {}).get('SearchResults', [])
+            for result_group in search_results:
+                if 'SearchResult' in result_group:
+                    for item in result_group['SearchResult']:
+                        metadata = item.get('Metadata', {})
+                        if metadata:
+                            return metadata.get('ratingKey')
         
         # Try without year if first search failed
         if year:
@@ -317,10 +321,13 @@ def search_plex_by_title(title, year, plex_token):
             
             if response.status_code == 200:
                 data = response.json()
-                metadata_list = data.get('MediaContainer', {}).get('Metadata', [])
-                
-                if metadata_list:
-                    return metadata_list[0].get('ratingKey')
+                search_results = data.get('MediaContainer', {}).get('SearchResults', [])
+                for result_group in search_results:
+                    if 'SearchResult' in result_group:
+                        for item in result_group['SearchResult']:
+                            metadata = item.get('Metadata', {})
+                            if metadata:
+                                return metadata.get('ratingKey')
         
         return None
     except Exception as e:
