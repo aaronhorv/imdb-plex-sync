@@ -281,34 +281,8 @@ def check_streaming_availability(tmdb_id, media_type, api_key, region, provider_
         add_log(f"Error checking streaming availability: {str(e)}", 'warning')
         return False, []
 
-
-def verify_plex_item_imdb(rating_key, imdb_id, plex_token):
-    """Verify that a Plex item matches the IMDB ID"""
-    try:
-        headers = {
-            'X-Plex-Token': plex_token,
-            'Accept': 'application/json'
-        }
-        
-        url = f"https://discover.provider.plex.tv/library/metadata/{rating_key}"
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            metadata = data.get('MediaContainer', {}).get('Metadata', [])
-            if metadata:
-                guids = metadata[0].get('Guid', [])
-                for guid in guids:
-                    if guid.get('id', '').endswith(imdb_id):
-                        return True
-        
-        return False
-    except Exception as e:
-        add_log(f"Error verifying Plex item: {str(e)}", 'warning')
-        return False
-
-def search_plex_by_title(title, year, plex_token):
-    """Search Plex discover for a movie/show by title"""
+def search_and_verify_plex(imdb_id, title, year, plex_token):
+    """Search Plex and verify IMDB ID matches - returns (ratingKey, verified_title) or (None, None)"""
     try:
         headers = {
             'X-Plex-Token': plex_token,
@@ -317,72 +291,83 @@ def search_plex_by_title(title, year, plex_token):
         
         search_url = "https://discover.provider.plex.tv/library/search"
         
-        search_query = f"{title} {year}" if year else title
-        params = {
-            'query': search_query,
-            'limit': 10,
-            'searchTypes': 'movies,tv',
-            'includeMetadata': 1,
-            'searchProviders': 'discover,plexAVOD'
-        }
+        # Try search with year first
+        search_queries = [
+            f"{title} {year}" if year else title,
+            title  # Fallback without year
+        ]
         
-        add_log(f"Searching Plex for: '{search_query}'", 'info')
-        response = requests.get(search_url, headers=headers, params=params, timeout=10)
-        
-        if response.status_code == 200:
+        for search_query in search_queries:
+            params = {
+                'query': search_query,
+                'limit': 20,  # Get more results to find the right match
+                'searchTypes': 'movies,tv',
+                'includeMetadata': 1,
+                'searchProviders': 'discover,plexAVOD'
+            }
+            
+            add_log(f"Searching Plex for: '{search_query}'", 'info')
+            response = requests.get(search_url, headers=headers, params=params, timeout=10)
+            
+            if response.status_code != 200:
+                continue
+            
             data = response.json()
             search_results = data.get('MediaContainer', {}).get('SearchResults', [])
             
+            # Check all results to find IMDB ID match
             for result_group in search_results:
-                if 'SearchResult' in result_group:
-                    for item in result_group['SearchResult']:
-                        metadata = item.get('Metadata', {})
-                        if metadata:
-                            rating_key = metadata.get('ratingKey')
-                            found_title = metadata.get('title', '')
-                            found_year = metadata.get('year', '')
-                            add_log(f"Found in Plex: '{found_title}' ({found_year}) - ratingKey: {rating_key}", 'info')
-                            return rating_key
+                if 'SearchResult' not in result_group:
+                    continue
+                    
+                for item in result_group['SearchResult']:
+                    metadata = item.get('Metadata', {})
+                    if not metadata:
+                        continue
+                    
+                    rating_key = metadata.get('ratingKey')
+                    if not rating_key:
+                        continue
+                    
+                    # Get full metadata to check IMDB ID
+                    metadata_url = f"https://discover.provider.plex.tv/library/metadata/{rating_key}"
+                    meta_response = requests.get(metadata_url, headers=headers, timeout=10)
+                    
+                    if meta_response.status_code == 200:
+                        meta_data = meta_response.json()
+                        full_metadata = meta_data.get('MediaContainer', {}).get('Metadata', [])
+                        
+                        if full_metadata:
+                            guids = full_metadata[0].get('Guid', [])
+                            found_title = full_metadata[0].get('title', '')
+                            found_year = full_metadata[0].get('year', '')
+                            
+                            # Check if IMDB ID matches
+                            for guid in guids:
+                                guid_id = guid.get('id', '')
+                                if imdb_id in guid_id:
+                                    add_log(f"✓ MATCH FOUND: '{found_title}' ({found_year}) - IMDB ID verified", 'success')
+                                    return rating_key, found_title
+                            
+                            add_log(f"✗ No match: '{found_title}' ({found_year}) - IMDB ID doesn't match", 'info')
         
-        # Try without year if first search failed
-        if year:
-            add_log(f"Trying search without year: '{title}'", 'info')
-            params['query'] = title
-            response = requests.get(search_url, headers=headers, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                search_results = data.get('MediaContainer', {}).get('SearchResults', [])
-                
-                for result_group in search_results:
-                    if 'SearchResult' in result_group:
-                        for item in result_group['SearchResult']:
-                            metadata = item.get('Metadata', {})
-                            if metadata:
-                                rating_key = metadata.get('ratingKey')
-                                found_title = metadata.get('title', '')
-                                found_year = metadata.get('year', '')
-                                add_log(f"Found in Plex (no year): '{found_title}' ({found_year}) - ratingKey: {rating_key}", 'info')
-                                return rating_key
+        add_log(f"Could not find '{title}' with matching IMDB ID {imdb_id} in Plex", 'warning')
+        return None, None
         
-        add_log(f"No results found in Plex for '{title}'", 'warning')
-        return None
     except Exception as e:
-        add_log(f"Error searching Plex: {str(e)}", 'warning')
-        return None
+        add_log(f"Error searching Plex: {str(e)}", 'error')
+        import traceback
+        add_log(f"Traceback: {traceback.format_exc()}", 'error')
+        return None, None
 
 def add_to_plex_watchlist(imdb_id, title, year, plex_token):
-    """Add item to Plex watchlist using the correct API"""
+    """Add item to Plex watchlist - only if IMDB ID is verified"""
     try:
-        rating_key = search_plex_by_title(title, year, plex_token)
+        rating_key, verified_title = search_and_verify_plex(imdb_id, title, year, plex_token)
         
         if not rating_key:
+            add_log(f"Skipping '{title}' - not found in Plex or IMDB ID mismatch", 'warning')
             return False
-        
-        # Try to verify IMDB ID, but don't fail if we can't
-        imdb_matches = verify_plex_item_imdb(rating_key, imdb_id, plex_token)
-        if not imdb_matches:
-            add_log(f"Warning: Could not verify IMDB ID for '{title}', but attempting to add anyway", 'warning')
         
         headers = {
             'X-Plex-Token': plex_token,
@@ -392,14 +377,14 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
         watchlist_url = f"https://discover.provider.plex.tv/actions/addToWatchlist"
         params = {'ratingKey': rating_key}
         
-        add_log(f"Attempting to add '{title}' with ratingKey {rating_key}", 'info')
+        add_log(f"Adding '{verified_title}' (verified) to watchlist", 'info')
         response = requests.put(watchlist_url, headers=headers, params=params, timeout=10)
         
-        add_log(f"Plex API response: {response.status_code} - {response.text[:200]}", 'info')
-        
         if response.status_code in [200, 204]:
+            add_log(f"Successfully added '{verified_title}' to Plex watchlist", 'success')
             return True
         
+        add_log(f"Failed to add '{verified_title}' - API returned {response.status_code}", 'error')
         return False
         
     except Exception as e:
@@ -480,14 +465,12 @@ def sync_watchlist():
         if add_to_plex_watchlist(item['imdb_id'], title, year, config['plexToken']):
             added += 1
             result['status'] = 'added'
-            add_log(f"Added '{title}' to Plex watchlist", 'success')
         else:
             result['status'] = 'failed'
-            result['error'] = 'Could not add to Plex'
-            add_log(f"Failed to add '{title}' to Plex watchlist", 'error')
+            result['error'] = 'Not found in Plex or IMDB ID mismatch'
         
         results.append(result)
-        time.sleep(1)
+        time.sleep(1.0)
     
     save_sync_results(results)
     
