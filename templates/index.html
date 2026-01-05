@@ -21,8 +21,7 @@
                 imdbListUrl: '',
                 plexToken: '',
                 tmdbApiKey: '',
-                region: 'US',
-                streamingServices: []
+                streamingServices: []  // Now [{"id": 8, "region": "DE"}, ...]
             });
             const [syncStatus, setSyncStatus] = useState({
                 lastSync: null,
@@ -36,18 +35,18 @@
             const [loading, setLoading] = useState(false);
 
             const streamingProviders = [
-                { id: 8, name: 'Netflix' },
-                { id: 350, name: 'Apple TV+' },
-                { id: 384, name: 'HBO Max' },
-                { id: 9, name: 'Amazon Prime Video' },
-                { id: 337, name: 'Disney+' },
-                { id: 531, name: 'Paramount+' },
-                { id: 389, name: 'Peacock' },
-                { id: 1899, name: 'Max' }
+                { id: 8, name: 'Netflix', defaultRegion: 'US' },
+                { id: 350, name: 'Apple TV+', defaultRegion: 'US' },
+                { id: 384, name: 'HBO Max', defaultRegion: 'US' },
+                { id: 1899, name: 'Max', defaultRegion: 'US' },
+                { id: 9, name: 'Amazon Prime Video', defaultRegion: 'US' },
+                { id: 337, name: 'Disney+', defaultRegion: 'US' },
+                { id: 531, name: 'Paramount+', defaultRegion: 'US' },
+                { id: 389, name: 'Peacock', defaultRegion: 'US' }
             ];
 
             const regions = [
-                'US', 'GB', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'CA', 'AU', 'JP', 'BR'
+                'US', 'GB', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'CA', 'AU', 'JP', 'BR', 'MX', 'IN'
             ];
 
             useEffect(() => {
@@ -97,13 +96,42 @@
                 }
             };
 
-            const handleServiceToggle = (serviceId) => {
+            const handleServiceToggle = (serviceId, defaultRegion) => {
+                setConfig(prev => {
+                    const exists = prev.streamingServices.find(s => s.id === serviceId);
+                    
+                    if (exists) {
+                        // Remove service
+                        return {
+                            ...prev,
+                            streamingServices: prev.streamingServices.filter(s => s.id !== serviceId)
+                        };
+                    } else {
+                        // Add service with default region
+                        return {
+                            ...prev,
+                            streamingServices: [...prev.streamingServices, { id: serviceId, region: defaultRegion }]
+                        };
+                    }
+                });
+            };
+
+            const handleRegionChange = (serviceId, newRegion) => {
                 setConfig(prev => ({
                     ...prev,
-                    streamingServices: prev.streamingServices.includes(serviceId)
-                        ? prev.streamingServices.filter(id => id !== serviceId)
-                        : [...prev.streamingServices, serviceId]
+                    streamingServices: prev.streamingServices.map(s =>
+                        s.id === serviceId ? { ...s, region: newRegion } : s
+                    )
                 }));
+            };
+
+            const isServiceEnabled = (serviceId) => {
+                return config.streamingServices.some(s => s.id === serviceId);
+            };
+
+            const getServiceRegion = (serviceId) => {
+                const service = config.streamingServices.find(s => s.id === serviceId);
+                return service?.region || 'US';
             };
 
             const handleSyncNow = async () => {
@@ -350,41 +378,58 @@
                                             />
                                             <p className="text-xs text-gray-400 mt-1">Get a free API key from themoviedb.org</p>
                                         </div>
-
-                                        <div>
-                                            <label className="block text-sm font-medium mb-2">Region</label>
-                                            <select
-                                                value={config.region}
-                                                onChange={(e) => setConfig({...config, region: e.target.value})}
-                                                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
-                                            >
-                                                {regions.map(region => (
-                                                    <option key={region} value={region}>{region}</option>
-                                                ))}
-                                            </select>
-                                        </div>
                                     </div>
                                 </div>
 
                                 <div className="bg-gray-800 p-6 rounded-lg">
                                     <h2 className="text-xl font-semibold mb-4">Streaming Services</h2>
                                     <p className="text-sm text-gray-400 mb-4">
-                                        Select the streaming services you have access to. Content available on these services will be skipped.
+                                        Select streaming services and their regions. Content available on these will be skipped.
                                     </p>
-                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                                        {streamingProviders.map(provider => (
-                                            <button
-                                                key={provider.id}
-                                                onClick={() => handleServiceToggle(provider.id)}
-                                                className={`p-3 rounded-lg border-2 transition-all ${
-                                                    config.streamingServices.includes(provider.id)
-                                                        ? 'border-blue-500 bg-blue-500/20'
-                                                        : 'border-gray-600 hover:border-gray-500'
-                                                }`}
-                                            >
-                                                <span className="font-medium">{provider.name}</span>
-                                            </button>
-                                        ))}
+                                    <div className="space-y-3">
+                                        {streamingProviders.map(provider => {
+                                            const enabled = isServiceEnabled(provider.id);
+                                            const region = getServiceRegion(provider.id);
+                                            
+                                            return (
+                                                <div key={provider.id} className={`p-4 rounded-lg border-2 transition-all ${
+                                                    enabled
+                                                        ? 'border-blue-500 bg-blue-500/10'
+                                                        : 'border-gray-600 bg-gray-700/50'
+                                                }`}>
+                                                    <div className="flex items-center justify-between">
+                                                        <button
+                                                            onClick={() => handleServiceToggle(provider.id, provider.defaultRegion)}
+                                                            className="flex items-center gap-3 flex-1"
+                                                        >
+                                                            <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                                                                enabled ? 'bg-blue-500 border-blue-500' : 'border-gray-500'
+                                                            }`}>
+                                                                {enabled && (
+                                                                    <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                                                    </svg>
+                                                                )}
+                                                            </div>
+                                                            <span className="font-medium">{provider.name}</span>
+                                                        </button>
+                                                        
+                                                        {enabled && (
+                                                            <select
+                                                                value={region}
+                                                                onChange={(e) => handleRegionChange(provider.id, e.target.value)}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                className="bg-gray-700 border border-gray-600 rounded px-3 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                                            >
+                                                                {regions.map(r => (
+                                                                    <option key={r} value={r}>{r}</option>
+                                                                ))}
+                                                            </select>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 </div>
 
