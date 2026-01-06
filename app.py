@@ -290,7 +290,7 @@ def get_tmdb_data(imdb_id, api_key):
         return None, None, None, None
 
 def check_streaming_availability(tmdb_id, media_type, api_key, streaming_services):
-    """Check streaming availability with per-service regions"""
+    """Check streaming availability with per-service regions - FIXED VERSION"""
     try:
         available_services = []
         
@@ -315,16 +315,33 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
             
             region_data = data['results'][region]
             
+            # Check flatrate (subscription) services
             if 'flatrate' in region_data:
                 for provider in region_data['flatrate']:
+                    # FIX: Ensure provider is a dictionary before accessing keys
+                    if not isinstance(provider, dict):
+                        add_log(f"Warning: Provider is not a dict: {provider}", 'warning')
+                        continue
+                    
+                    provider_id = provider.get('provider_id')
+                    provider_name = provider.get('provider_name', 'Unknown')
+                    
+                    if not provider_id:
+                        continue
+                    
+                    # Check if this provider matches any of our configured services
                     for service in services:
-                        if provider['provider_id'] == service['id']:
-                            service_name = f"{provider['provider_name']} ({region})"
-                            available_services.append(service_name)
+                        service_id = service.get('id')
+                        if provider_id == service_id:
+                            service_name = f"{provider_name} ({region})"
+                            if service_name not in available_services:
+                                available_services.append(service_name)
         
         return len(available_services) > 0, available_services
     except Exception as e:
         add_log(f"Error checking streaming availability: {str(e)}", 'warning')
+        import traceback
+        add_log(f"Traceback: {traceback.format_exc()}", 'error')
         return False, []
 
 def search_and_verify_plex(imdb_id, title, year, plex_token):
