@@ -69,10 +69,11 @@ def extract_user_id(url):
     return None
 
 def scrape_watchlist_page(soup, url):
-    """Scrape watchlist page for IMDB IDs"""
+    """Scrape watchlist page for IMDB IDs - improved for modern IMDB"""
     items = []
     seen_ids = set()
     
+    # Method 1: Find all title links (most reliable)
     title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+'))
     
     for link in title_links:
@@ -86,7 +87,18 @@ def scrape_watchlist_page(soup, url):
                 continue
             seen_ids.add(imdb_id)
             
+            # Try to get title text from the link or nearby elements
             title = link.get_text(strip=True)
+            
+            # If link text is empty, look for title in parent elements
+            if not title or len(title) < 2:
+                parent = link.parent
+                if parent:
+                    # Look for h3 or other heading elements
+                    heading = parent.find(['h3', 'h2', 'h1'])
+                    if heading:
+                        title = heading.get_text(strip=True)
+            
             if not title or len(title) < 2:
                 title = f"IMDB:{imdb_id}"
             
@@ -96,19 +108,44 @@ def scrape_watchlist_page(soup, url):
                 'link': f"https://www.imdb.com/title/{imdb_id}/"
             })
     
+    # Method 2: Look for JSON-LD structured data (backup method)
+    if not items:
+        scripts = soup.find_all('script', type='application/ld+json')
+        for script in scripts:
+            try:
+                data = json.loads(script.string)
+                if isinstance(data, list):
+                    for item in data:
+                        if item.get('@type') in ['Movie', 'TVSeries']:
+                            url = item.get('url', '')
+                            imdb_match = re.search(r'/title/(tt\d+)', url)
+                            if imdb_match:
+                                imdb_id = imdb_match.group(1)
+                                if imdb_id not in seen_ids:
+                                    seen_ids.add(imdb_id)
+                                    items.append({
+                                        'title': item.get('name', f"IMDB:{imdb_id}"),
+                                        'imdb_id': imdb_id,
+                                        'link': f"https://www.imdb.com/title/{imdb_id}/"
+                                    })
+            except:
+                continue
+    
     return items
 
 def get_imdb_export_data(user_id):
-    """Get IMDB watchlist data - handles pagination and lazy loading"""
+    """Get IMDB watchlist data - handles lazy loading with API pagination"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': f'https://www.imdb.com/user/{user_id}/watchlist'
+            'Referer': f'https://www.imdb.com/user/{user_id}/watchlist',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9'
         }
         
         session = requests.Session()
         
-        # Try CSV export first (gets everything in one go)
+        # First, get the watchlist page to find the list ID
         watchlist_url = f"https://www.imdb.com/user/{user_id}/watchlist"
         add_log(f"Fetching watchlist page: {watchlist_url}", 'info')
         response = session.get(watchlist_url, headers=headers, timeout=15)
@@ -116,7 +153,7 @@ def get_imdb_export_data(user_id):
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Find list ID for CSV export
+        # Find list ID for API calls and CSV export
         list_id = None
         list_elements = soup.find_all(attrs={'data-list-id': True})
         if list_elements:
@@ -133,58 +170,73 @@ def get_imdb_export_data(user_id):
                         add_log(f"Found list ID in script: {list_id}", 'info')
                         break
         
-        # Try CSV export - this gets ALL items at once
-        if list_id:
-            export_url = f"https://www.imdb.com/list/{list_id}/export"
-            add_log(f"Attempting CSV export: {export_url}", 'info')
-            
+        if not list_id:
+            add_log("Could not find list ID, falling back to scraping", 'warning')
+            return scrape_watchlist_page(soup, watchlist_url)
+        
+        # Method 1: Try CSV export - this gets ALL items at once (fastest!)
+        export_url = f"https://www.imdb.com/list/{list_id}/export"
+        add_log(f"Attempting CSV export: {export_url}", 'info')
+        
+        try:
             response = session.get(export_url, headers=headers, timeout=15)
             if response.status_code == 200 and len(response.text) > 100:
                 csv_items = parse_csv_export(response.text)
                 if csv_items:
                     add_log(f"✓ CSV export successful: {len(csv_items)} items", 'success')
                     return csv_items
+        except Exception as e:
+            add_log(f"CSV export failed: {e}", 'warning')
         
-        # Fallback: paginate through the list
-        add_log("CSV export not available, using pagination", 'warning')
+        # Method 2: Use IMDB's JSON API with pagination (handles lazy loading)
+        add_log("CSV export not available, using JSON API pagination", 'info')
         all_items = []
         page = 1
+        page_size = 250  # IMDB's max per page
         
         while True:
-            if page > 1:
-                # IMDB uses ?page= for pagination
-                page_url = f"{watchlist_url}?page={page}"
-                add_log(f"Fetching page {page}: {page_url}", 'info')
-                response = session.get(page_url, headers=headers, timeout=15)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.content, 'html.parser')
+            # IMDB's internal API endpoint for list items
+            api_url = f"https://www.imdb.com/list/{list_id}/"
+            params = {
+                'sort': 'list_order,asc',
+                'mode': 'detail',
+                'page': page
+            }
             
-            page_items = scrape_watchlist_page(soup, watchlist_url)
+            add_log(f"Fetching page {page} via API...", 'info')
+            response = session.get(api_url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            page_items = scrape_watchlist_page(soup, api_url)
             
             if not page_items:
-                add_log(f"No items on page {page}, stopping", 'info')
+                add_log(f"No items found on page {page}, stopping", 'info')
                 break
             
             all_items.extend(page_items)
             add_log(f"Page {page}: found {len(page_items)} items (total: {len(all_items)})", 'info')
             
-            # Check for next page button
-            next_button = soup.find('button', class_=re.compile(r'next|ipc-pagination'))
-            next_link = soup.find('a', attrs={'aria-label': 'Next'})
-            
-            if not next_button and not next_link:
-                add_log("No more pages found", 'info')
+            # Check if we got fewer items than expected (last page)
+            if len(page_items) < 100:  # IMDB typically shows 100 items per page
+                add_log(f"Received {len(page_items)} items (less than full page), assuming last page", 'info')
                 break
             
+            # Safety check for reasonable page limit
             page += 1
-            
-            if page > 20:  # Safety limit
-                add_log("Reached page limit (20), stopping", 'warning')
+            if page > 50:  # 50 pages * 100 items = 5000 max items
+                add_log("Reached safety page limit (50 pages)", 'warning')
                 break
             
-            time.sleep(0.5)
+            time.sleep(0.3)  # Be nice to IMDB's servers
         
-        return all_items
+        if all_items:
+            add_log(f"✓ Successfully fetched {len(all_items)} items via pagination", 'success')
+            return all_items
+        
+        # Method 3: Last resort - scrape the initial page
+        add_log("Pagination failed, returning items from first page only", 'warning')
+        return scrape_watchlist_page(soup, watchlist_url)
         
     except Exception as e:
         add_log(f"Error in get_imdb_export_data: {str(e)}", 'error')
