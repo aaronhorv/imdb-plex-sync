@@ -626,7 +626,7 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
         rating_key, verified_title = search_and_verify_plex(imdb_id, title, year, plex_token)
         
         if not rating_key:
-            add_log(f"Could not find '{title}' in Plex to remove", 'warning')
+            add_log(f"Could not find '{title}' in Plex library", 'info')
             return False
         
         headers = {
@@ -634,18 +634,22 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
             'Accept': 'application/json'
         }
         
+        # Note: Plex uses PUT (not DELETE) for removeFromWatchlist
         watchlist_url = f"https://discover.provider.plex.tv/actions/removeFromWatchlist"
         params = {'ratingKey': rating_key}
         
-        response = requests.delete(watchlist_url, headers=headers, params=params, timeout=10)
+        response = requests.put(watchlist_url, headers=headers, params=params, timeout=10)
         
         if response.status_code in [200, 204]:
             add_log(f"✓ Removed '{verified_title}' from Plex watchlist", 'success')
             return True
+        elif response.status_code == 404:
+            # Item exists in Plex but not on watchlist - this is fine
+            add_log(f"'{verified_title}' not on Plex watchlist (was never added)", 'info')
+            return False
         else:
             add_log(f"Failed to remove '{title}': HTTP {response.status_code}", 'error')
-        
-        return False
+            return False
         
     except Exception as e:
         add_log(f"Error removing from Plex: {str(e)}", 'error')
