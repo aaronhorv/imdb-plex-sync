@@ -14,6 +14,7 @@ app = Flask(__name__)
 CONFIG_FILE = '/config/config.json'
 LOGS_FILE = '/config/logs.json'
 RESULTS_FILE = '/config/sync_results.json'
+STATS_FILE = '/config/sync_stats.json'
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -41,6 +42,19 @@ def save_sync_results(results):
     os.makedirs('/config', exist_ok=True)
     with open(RESULTS_FILE, 'w') as f:
         json.dump(results, f, indent=2)
+
+def save_sync_stats(stats):
+    """Save sync statistics including removed count"""
+    os.makedirs('/config', exist_ok=True)
+    with open(STATS_FILE, 'w') as f:
+        json.dump(stats, f, indent=2)
+
+def load_sync_stats():
+    """Load sync statistics"""
+    if os.path.exists(STATS_FILE):
+        with open(STATS_FILE, 'r') as f:
+            return json.load(f)
+    return {'removed': 0, 'last_sync': None}
 
 def add_log(message, log_type='info'):
     logs = []
@@ -606,6 +620,79 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
         add_log(f"Error adding to Plex: {str(e)}", 'error')
         return False
 
+def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
+    """Remove item from Plex watchlist"""
+    try:
+        rating_key, verified_title = search_and_verify_plex(imdb_id, title, year, plex_token)
+        
+        if not rating_key:
+            return False
+        
+        headers = {
+            'X-Plex-Token': plex_token,
+            'Accept': 'application/json'
+        }
+        
+        watchlist_url = f"https://discover.provider.plex.tv/actions/removeFromWatchlist"
+        params = {'ratingKey': rating_key}
+        
+        response = requests.delete(watchlist_url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code in [200, 204]:
+            add_log(f"✓ Removed '{verified_title}' from Plex watchlist", 'success')
+            return True
+        
+        return False
+        
+    except Exception as e:
+        add_log(f"Error removing from Plex: {str(e)}", 'error')
+        return False
+
+def get_plex_watchlist(plex_token):
+    """Get all items currently in Plex watchlist"""
+    try:
+        headers = {
+            'X-Plex-Token': plex_token,
+            'Accept': 'application/json'
+        }
+        
+        # Get watchlist from Plex
+        watchlist_url = "https://discover.provider.plex.tv/library/sections/watchlist/all"
+        response = requests.get(watchlist_url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            add_log(f"Failed to fetch Plex watchlist: {response.status_code}", 'error')
+            return []
+        
+        data = response.json()
+        items = []
+        
+        # Extract IMDB IDs from watchlist items
+        if 'MediaContainer' in data and 'Metadata' in data['MediaContainer']:
+            for item in data['MediaContainer']['Metadata']:
+                # Try to find IMDB ID in the guids
+                imdb_id = None
+                if 'Guid' in item:
+                    for guid in item['Guid']:
+                        guid_id = guid.get('id', '')
+                        if 'imdb://' in guid_id:
+                            imdb_id = guid_id.replace('imdb://', '')
+                            break
+                
+                if imdb_id:
+                    items.append({
+                        'imdb_id': imdb_id,
+                        'title': item.get('title'),
+                        'year': item.get('year'),
+                        'rating_key': item.get('ratingKey')
+                    })
+        
+        return items
+        
+    except Exception as e:
+        add_log(f"Error fetching Plex watchlist: {str(e)}", 'error')
+        return []
+
 def sync_watchlist():
     config = load_config()
     
@@ -617,14 +704,46 @@ def sync_watchlist():
     add_log("Starting sync", 'info')
     add_log("=" * 50, 'info')
     
+    # Step 1: Get IMDB watchlist
     items = get_imdb_watchlist(config['imdbListUrl'])
     
     if not items:
         add_log("No items found in watchlist", 'warning')
         return
     
-    add_log(f"Found {len(items)} items total", 'info')
+    add_log(f"Found {len(items)} items in IMDB watchlist", 'info')
     
+    # Step 2: Get current Plex watchlist for cleanup
+    add_log("Fetching Plex watchlist for cleanup...", 'info')
+    plex_items = get_plex_watchlist(config['plexToken'])
+    add_log(f"Found {len(plex_items)} items in Plex watchlist", 'info')
+    
+    # Step 3: Check Plex watchlist items for streaming availability and remove if found
+    removed = 0
+    for plex_item in plex_items:
+        # Get TMDB data for the Plex item
+        tmdb_id, media_type, title, year = get_tmdb_data(plex_item['imdb_id'], config['tmdbApiKey'])
+        
+        if not tmdb_id:
+            continue
+        
+        # Check if it's now available on streaming
+        is_available, providers = check_streaming_availability(
+            tmdb_id,
+            media_type,
+            config['tmdbApiKey'],
+            config['streamingServices']
+        )
+        
+        if is_available:
+            add_log(f"🗑️  '{plex_item['title']}' now on {', '.join(providers)} - removing from Plex", 'warning')
+            if remove_from_plex_watchlist(plex_item['imdb_id'], plex_item['title'], plex_item['year'], config['plexToken']):
+                removed += 1
+    
+    if removed > 0:
+        add_log(f"Removed {removed} items from Plex watchlist (now on streaming)", 'info')
+    
+    # Step 4: Process IMDB watchlist items
     processed = 0
     added = 0
     skipped = 0
@@ -682,6 +801,17 @@ def sync_watchlist():
         time.sleep(1.0)
     
     save_sync_results(results)
+    save_sync_stats({
+        'removed': removed,
+        'last_sync': datetime.now().isoformat()
+    })
+    
+    add_log("=" * 50, 'info')
+    add_log(f"Complete: {processed} processed, {added} added, {skipped} skipped, {removed} removed", 'success')
+    add_log("=" * 50, 'info')
+        time.sleep(1.0)
+    
+    save_sync_results(results)
     
     add_log("=" * 50, 'info')
     add_log(f"Complete: {processed} processed, {added} added, {skipped} skipped", 'success')
@@ -728,25 +858,28 @@ def trigger_sync():
 @app.route('/api/status', methods=['GET'])
 def get_status():
     results = load_sync_results()
+    stats = load_sync_stats()
     
     if not results:
         return jsonify({
-            'lastSync': None,
+            'lastSync': stats.get('last_sync'),
             'status': 'idle',
             'processed': 0,
             'added': 0,
-            'skipped': 0
+            'skipped': 0,
+            'removed': stats.get('removed', 0)
         })
     
     added = len([r for r in results if r['status'] == 'added'])
     skipped = len([r for r in results if r['status'] == 'skipped'])
     
     return jsonify({
-        'lastSync': datetime.now().isoformat(),
+        'lastSync': stats.get('last_sync', datetime.now().isoformat()),
         'status': 'completed',
         'processed': len(results),
         'added': added,
-        'skipped': skipped
+        'skipped': skipped,
+        'removed': stats.get('removed', 0)
     })
 
 @app.route('/health', methods=['GET'])
