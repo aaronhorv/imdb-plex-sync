@@ -620,14 +620,9 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
         add_log(f"Error adding to Plex: {str(e)}", 'error')
         return False
 
-def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
-    """Remove item from Plex watchlist"""
+def remove_from_plex_watchlist(rating_key, title, plex_token):
+    """Remove item from Plex watchlist using rating key"""
     try:
-        rating_key, verified_title = search_and_verify_plex(imdb_id, title, year, plex_token)
-        
-        if not rating_key:
-            return False
-        
         headers = {
             'X-Plex-Token': plex_token,
             'Accept': 'application/json'
@@ -639,8 +634,10 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
         response = requests.delete(watchlist_url, headers=headers, params=params, timeout=10)
         
         if response.status_code in [200, 204]:
-            add_log(f"✓ Removed '{verified_title}' from Plex watchlist", 'success')
+            add_log(f"✓ Removed '{title}' from Plex watchlist", 'success')
             return True
+        else:
+            add_log(f"Failed to remove '{title}': HTTP {response.status_code}", 'error')
         
         return False
         
@@ -739,7 +736,14 @@ def get_plex_watchlist(plex_token):
                     })
                     add_log(f"Found in Plex watchlist: {item.get('title')} ({item.get('year')}) - IMDB: {imdb_id}", 'info')
                 else:
-                    add_log(f"No IMDB ID found for: {item.get('title')} - guid: {item.get('guid', 'none')}", 'warning')
+                    # No IMDB ID but still store it (we can match by title later if needed)
+                    all_items.append({
+                        'imdb_id': None,
+                        'title': item.get('title'),
+                        'year': item.get('year'),
+                        'rating_key': item.get('ratingKey')
+                    })
+                    add_log(f"Found in Plex watchlist: {item.get('title')} ({item.get('year')}) - No IMDB ID, guid: {item.get('guid', 'none')}", 'info')
             
             # Check if we've got all items
             offset += current_size
@@ -780,8 +784,11 @@ def sync_watchlist():
     plex_items = get_plex_watchlist(config['plexToken'])
     add_log(f"Found {len(plex_items)} items in Plex watchlist", 'info')
     
-    # Create a dict for quick lookup of Plex items by IMDB ID
-    plex_dict = {item['imdb_id']: item for item in plex_items}
+    # Create a dict for quick lookup of Plex items by IMDB ID (only items with IMDB IDs)
+    plex_dict = {}
+    for item in plex_items:
+        if item['imdb_id']:
+            plex_dict[item['imdb_id']] = item
     
     # Step 3: Process each IMDB item
     processed = 0
@@ -832,9 +839,10 @@ def sync_watchlist():
             
             # Check if it's in Plex watchlist
             if item['imdb_id'] in plex_dict:
-                # Remove from Plex
+                # Remove from Plex using rating key
+                plex_item = plex_dict[item['imdb_id']]
                 add_log(f"  🗑️  Removing from Plex watchlist", 'warning')
-                if remove_from_plex_watchlist(item['imdb_id'], title, year, config['plexToken']):
+                if remove_from_plex_watchlist(plex_item['rating_key'], title, config['plexToken']):
                     removed += 1
                     result['status'] = 'removed'
                 else:
