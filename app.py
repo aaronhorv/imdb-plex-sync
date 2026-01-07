@@ -432,6 +432,10 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
     try:
         available_services = []
         
+        # Log what we're checking
+        add_log(f"Checking streaming for TMDB ID {tmdb_id} ({media_type})", 'info')
+        add_log(f"Configured services: {streaming_services}", 'info')
+        
         # Group services by region for efficiency
         regions_to_check = {}
         for service in streaming_services:
@@ -452,6 +456,8 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
                 regions_to_check[region] = []
             regions_to_check[region].append(service_obj)
         
+        add_log(f"Regions to check: {list(regions_to_check.keys())}", 'info')
+        
         # Check each region
         for region, services in regions_to_check.items():
             url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/watch/providers"
@@ -460,10 +466,14 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
             response.raise_for_status()
             data = response.json()
             
+            add_log(f"Checking region {region} - Available regions in response: {list(data.get('results', {}).keys())}", 'info')
+            
             if 'results' not in data or region not in data['results']:
+                add_log(f"No data for region {region}", 'info')
                 continue
             
             region_data = data['results'][region]
+            add_log(f"Region {region} providers: {region_data.get('flatrate', [])}", 'info')
             
             # Check flatrate (subscription) services
             if 'flatrate' in region_data:
@@ -476,17 +486,22 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
                     provider_id = provider.get('provider_id')
                     provider_name = provider.get('provider_name', 'Unknown')
                     
+                    add_log(f"Found provider: {provider_name} (ID: {provider_id})", 'info')
+                    
                     if not provider_id:
                         continue
                     
                     # Check if this provider matches any of our configured services
                     for service in services:
                         service_id = service.get('id')
+                        add_log(f"Comparing provider {provider_id} with configured service {service_id}", 'info')
                         if provider_id == service_id:
                             service_name = f"{provider_name} ({region})"
                             if service_name not in available_services:
                                 available_services.append(service_name)
+                                add_log(f"MATCH! Added {service_name}", 'success')
         
+        add_log(f"Final available services: {available_services}", 'info')
         return len(available_services) > 0, available_services
     except Exception as e:
         add_log(f"Error checking streaming availability: {str(e)}", 'warning')
