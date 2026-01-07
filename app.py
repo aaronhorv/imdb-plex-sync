@@ -656,41 +656,103 @@ def get_plex_watchlist(plex_token):
             'Accept': 'application/json'
         }
         
-        # Get watchlist from Plex
+        # Get watchlist from Plex (discover endpoint is correct)
         watchlist_url = "https://discover.provider.plex.tv/library/sections/watchlist/all"
-        response = requests.get(watchlist_url, headers=headers, timeout=10)
+        add_log(f"Fetching Plex watchlist from: {watchlist_url}", 'info')
         
-        if response.status_code != 200:
-            add_log(f"Failed to fetch Plex watchlist: {response.status_code}", 'error')
-            return []
+        # Fetch all pages (Plex paginates results)
+        all_items = []
+        offset = 0
+        page_size = 50
         
-        data = response.json()
-        items = []
-        
-        # Extract IMDB IDs from watchlist items
-        if 'MediaContainer' in data and 'Metadata' in data['MediaContainer']:
-            for item in data['MediaContainer']['Metadata']:
-                # Try to find IMDB ID in the guids
+        while True:
+            params = {
+                'X-Plex-Container-Start': offset,
+                'X-Plex-Container-Size': page_size
+            }
+            
+            response = requests.get(watchlist_url, headers=headers, params=params, timeout=10)
+            
+            add_log(f"Plex watchlist response: {response.status_code}", 'info')
+            
+            if response.status_code != 200:
+                add_log(f"Failed to fetch Plex watchlist: {response.status_code}", 'error')
+                add_log(f"Response: {response.text[:200]}", 'error')
+                break
+            
+            data = response.json()
+            
+            if 'MediaContainer' not in data:
+                add_log("No MediaContainer in response", 'warning')
+                break
+            
+            container = data['MediaContainer']
+            total_size = container.get('totalSize', 0)
+            current_size = container.get('size', 0)
+            
+            add_log(f"Page: offset={offset}, size={current_size}, total={total_size}", 'info')
+            
+            if 'Metadata' not in container or not container['Metadata']:
+                break
+            
+            # Process items from this page
+            for item in container['Metadata']:
+                # Try to extract IMDB ID from guid or key
                 imdb_id = None
-                if 'Guid' in item:
-                    for guid in item['Guid']:
-                        guid_id = guid.get('id', '')
+                
+                # Method 1: Check the 'guid' field directly
+                guid = item.get('guid', '')
+                if 'imdb://' in guid:
+                    imdb_id = guid.split('imdb://')[-1].split('/')[0]
+                
+                # Method 2: Check Guid array
+                if not imdb_id and 'Guid' in item:
+                    for guid_obj in item['Guid']:
+                        guid_id = guid_obj.get('id', '')
                         if 'imdb://' in guid_id:
-                            imdb_id = guid_id.replace('imdb://', '')
+                            imdb_id = guid_id.split('imdb://')[-1].split('/')[0]
+                            break
+                        elif guid_id.startswith('tt'):
+                            imdb_id = guid_id
                             break
                 
+                # Method 3: Try to get from key
+                if not imdb_id:
+                    key = item.get('key', '')
+                    if 'tt' in key:
+                        # Extract ttXXXXXX pattern
+                        import re
+                        match = re.search(r'(tt\d+)', key)
+                        if match:
+                            imdb_id = match.group(1)
+                
                 if imdb_id:
-                    items.append({
+                    # Clean up IMDB ID
+                    if not imdb_id.startswith('tt'):
+                        imdb_id = 'tt' + imdb_id
+                    
+                    all_items.append({
                         'imdb_id': imdb_id,
                         'title': item.get('title'),
                         'year': item.get('year'),
                         'rating_key': item.get('ratingKey')
                     })
+                    add_log(f"Found in Plex watchlist: {item.get('title')} ({item.get('year')}) - IMDB: {imdb_id}", 'info')
+                else:
+                    add_log(f"No IMDB ID found for: {item.get('title')} - guid: {item.get('guid', 'none')}", 'warning')
+            
+            # Check if we've got all items
+            offset += current_size
+            if offset >= total_size:
+                break
         
-        return items
+        add_log(f"Total items with IMDB IDs in Plex watchlist: {len(all_items)}", 'info')
+        return all_items
         
     except Exception as e:
         add_log(f"Error fetching Plex watchlist: {str(e)}", 'error')
+        import traceback
+        add_log(f"Traceback: {traceback.format_exc()}", 'error')
         return []
 
 def sync_watchlist():
