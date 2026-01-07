@@ -68,76 +68,86 @@ def extract_user_id(url):
         return match.group(1)
     return None
 
-def scrape_watchlist_page(soup, url):
-    """Scrape watchlist page for IMDB IDs - improved for modern IMDB"""
+def scrape_watchlist_page(soup, url, html_content=None):
+    """Scrape watchlist page for IMDB IDs using JSON extraction - gets ALL titles"""
     items = []
     seen_ids = set()
     
-    # Method 1: Find all title links (most reliable)
-    title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+'))
-    add_log(f"DEBUG: Found {len(title_links)} title links on page", 'info')
+    # Use the HTML content if provided, otherwise get it from soup
+    if html_content is None:
+        html_content = str(soup)
     
-    for link in title_links:
-        href = link.get('href', '')
-        imdb_match = re.search(r'/title/(tt\d+)', href)
+    # PRIMARY METHOD: Extract titles from embedded JSON (gets ALL 248+ items!)
+    # Titles are stored as: "titleText":{"text":"TITLE_HERE"}
+    # This regex matches the pattern and extracts just the title text
+    title_pattern = r'"titleText"[^}]*"text":"([^"]*)"'
+    title_matches = re.findall(title_pattern, html_content)
+    
+    add_log(f"DEBUG: Found {len(title_matches)} titles in JSON data", 'info')
+    
+    # Also extract IMDB IDs from the same JSON structure
+    # IDs appear as: /title/tt1234567/
+    id_pattern = r'/title/(tt\d+)/'
+    id_matches = re.findall(id_pattern, html_content)
+    
+    add_log(f"DEBUG: Found {len(id_matches)} IMDB IDs in HTML", 'info')
+    
+    # Match titles with IDs (they appear in the same order in the JSON structure)
+    for i, imdb_id in enumerate(id_matches):
+        if imdb_id in seen_ids:
+            continue
+        seen_ids.add(imdb_id)
         
-        if imdb_match:
-            imdb_id = imdb_match.group(1)
-            
-            if imdb_id in seen_ids:
-                continue
-            seen_ids.add(imdb_id)
-            
-            # Try to get title text from the link or nearby elements
-            title = link.get_text(strip=True)
-            
-            # If link text is empty, look for title in parent elements
-            if not title or len(title) < 2:
-                parent = link.parent
-                if parent:
-                    # Look for h3 or other heading elements
-                    heading = parent.find(['h3', 'h2', 'h1'])
-                    if heading:
-                        title = heading.get_text(strip=True)
-            
-            if not title or len(title) < 2:
-                title = f"IMDB:{imdb_id}"
-            
-            items.append({
-                'title': title,
-                'imdb_id': imdb_id,
-                'link': f"https://www.imdb.com/title/{imdb_id}/"
-            })
+        # Get corresponding title if available
+        title = title_matches[i] if i < len(title_matches) else f"IMDB:{imdb_id}"
+        
+        items.append({
+            'title': title,
+            'imdb_id': imdb_id,
+            'link': f"https://www.imdb.com/title/{imdb_id}/"
+        })
     
-    add_log(f"DEBUG: Extracted {len(items)} unique items from title links", 'info')
+    add_log(f"DEBUG: Extracted {len(items)} unique items from JSON extraction", 'info')
     
-    # Method 2: Look for JSON-LD structured data (backup method)
+    # FALLBACK METHOD: If JSON extraction failed, try traditional scraping
     if not items:
-        add_log("DEBUG: No items from title links, trying JSON-LD", 'info')
-        scripts = soup.find_all('script', type='application/ld+json')
-        add_log(f"DEBUG: Found {len(scripts)} JSON-LD scripts", 'info')
+        add_log("DEBUG: JSON extraction failed, trying traditional scraping", 'warning')
         
-        for script in scripts:
-            try:
-                data = json.loads(script.string)
-                if isinstance(data, list):
-                    for item in data:
-                        if item.get('@type') in ['Movie', 'TVSeries']:
-                            url = item.get('url', '')
-                            imdb_match = re.search(r'/title/(tt\d+)', url)
-                            if imdb_match:
-                                imdb_id = imdb_match.group(1)
-                                if imdb_id not in seen_ids:
-                                    seen_ids.add(imdb_id)
-                                    items.append({
-                                        'title': item.get('name', f"IMDB:{imdb_id}"),
-                                        'imdb_id': imdb_id,
-                                        'link': f"https://www.imdb.com/title/{imdb_id}/"
-                                    })
-            except Exception as e:
-                continue
+        # Method 1: Find all title links
+        title_links = soup.find_all('a', href=re.compile(r'/title/tt\d+'))
+        add_log(f"DEBUG: Found {len(title_links)} title links", 'info')
         
-        add_log(f"DEBUG: Extracted {len(items)} items from JSON-LD", 'info')
+        for link in title_links:
+            href = link.get('href', '')
+            imdb_match = re.search(r'/title/(tt\d+)', href)
+            
+            if imdb_match:
+                imdb_id = imdb_match.group(1)
+                
+                if imdb_id in seen_ids:
+                    continue
+                seen_ids.add(imdb_id)
+                
+                # Try to get title text
+                title = link.get_text(strip=True)
+                
+                if not title or len(title) < 2:
+                    parent = link.parent
+                    if parent:
+                        heading = parent.find(['h3', 'h2', 'h1'])
+                        if heading:
+                            title = heading.get_text(strip=True)
+                
+                if not title or len(title) < 2:
+                    title = f"IMDB:{imdb_id}"
+                
+                items.append({
+                    'title': title,
+                    'imdb_id': imdb_id,
+                    'link': f"https://www.imdb.com/title/{imdb_id}/"
+                })
+        
+        add_log(f"DEBUG: Fallback method extracted {len(items)} items", 'info')
     
     return items
 
@@ -161,7 +171,20 @@ def get_imdb_export_data(user_id):
             add_log(f"Failed to fetch watchlist: {response.status_code}", 'error')
             return []
         
+        # Store the raw HTML content for JSON extraction
+        html_content = response.text
         soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # FAST PATH: Try JSON extraction on the initial page
+        # This method gets ALL items in one request!
+        add_log("Attempting JSON extraction from initial page...", 'info')
+        initial_items = scrape_watchlist_page(soup, watchlist_url, html_content)
+        
+        if initial_items and len(initial_items) >= 200:  # If we got most/all items
+            add_log(f"✓ JSON extraction successful: {len(initial_items)} items from first page!", 'success')
+            return initial_items
+        elif initial_items:
+            add_log(f"JSON extraction found {len(initial_items)} items, trying other methods...", 'info')
         
         # Step 2: Find the list ID (required for all methods)
         list_id = None
@@ -213,7 +236,7 @@ def get_imdb_export_data(user_id):
         
         if not list_id:
             add_log("ERROR: Could not find list ID. Watchlist may be private or URL invalid.", 'error')
-            return scrape_watchlist_page(soup, watchlist_url)
+            return scrape_watchlist_page(soup, watchlist_url, html_content)
         
         # Step 3: Try CSV export first (gets ALL items in one request)
         add_log(f"Attempting CSV export for list {list_id}...", 'info')
@@ -275,8 +298,9 @@ def get_imdb_export_data(user_id):
                     add_log(f"List page returned {page_response.status_code}, stopping", 'warning')
                     break
                 
+                page_html = page_response.text
                 page_soup = BeautifulSoup(page_response.content, 'html.parser')
-                page_items = scrape_watchlist_page(page_soup, list_url)
+                page_items = scrape_watchlist_page(page_soup, list_url, page_html)
                 
                 # Filter duplicates
                 new_items = [item for item in page_items if item['imdb_id'] not in seen_ids]
@@ -316,8 +340,9 @@ def get_imdb_export_data(user_id):
         try:
             response = session.get(compact_url, headers=headers, timeout=20)
             if response.status_code == 200:
+                compact_html = response.text
                 soup = BeautifulSoup(response.content, 'html.parser')
-                items = scrape_watchlist_page(soup, compact_url)
+                items = scrape_watchlist_page(soup, compact_url, compact_html)
                 if items:
                     add_log(f"Compact mode found {len(items)} items", 'info')
                     return items
@@ -326,7 +351,7 @@ def get_imdb_export_data(user_id):
         
         # Absolute last resort
         add_log("All methods failed, returning initial scrape", 'error')
-        initial_items = scrape_watchlist_page(soup, watchlist_url)
+        initial_items = scrape_watchlist_page(soup, watchlist_url, html_content)
         return initial_items
         
     except Exception as e:
@@ -943,6 +968,14 @@ def get_status():
         'added': added,
         'skipped': skipped
     })
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Docker"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat()
+    }), 200
 
 if __name__ == '__main__':
     add_log("Application starting", 'info')
