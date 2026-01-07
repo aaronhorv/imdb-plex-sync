@@ -426,17 +426,39 @@ def get_imdb_watchlist(list_url):
         return []
 
 def get_imdb_list_data(list_id):
-    """Get IMDB list data directly using list ID - Uses RSS feed like Radarr"""
+    """Get IMDB list data directly using list ID - Now with JSON extraction!"""
     try:
         session = requests.Session()
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
         }
         
         add_log(f"Using list ID: {list_id}", 'info')
+        
+        # FAST PATH: JSON Extraction (gets ALL items in one request!)
+        add_log(f"Attempting JSON extraction from list page...", 'info')
+        list_url = f"https://www.imdb.com/list/{list_id}/"
+        
+        try:
+            response = session.get(list_url, headers=headers, timeout=20)
+            
+            if response.status_code == 200:
+                html_content = response.text
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Use the JSON extraction method
+                items = scrape_watchlist_page(soup, list_url, html_content)
+                
+                if items and len(items) >= 200:
+                    add_log(f"✓ JSON extraction successful: {len(items)} items from list page!", 'success')
+                    return items
+                elif items:
+                    add_log(f"JSON extraction found {len(items)} items, trying other methods...", 'info')
+        except Exception as e:
+            add_log(f"JSON extraction error: {e}", 'warning')
         
         # Method 1: RSS Feed (THIS IS WHAT RADARR USES!)
         # RSS feeds contain ALL items in the list
@@ -520,8 +542,9 @@ def get_imdb_list_data(list_id):
                     add_log(f"API returned {api_response.status_code}", 'warning')
                     break
                 
+                page_html = api_response.text
                 page_soup = BeautifulSoup(api_response.content, 'html.parser')
-                page_items = scrape_watchlist_page(page_soup, api_url)
+                page_items = scrape_watchlist_page(page_soup, api_url, page_html)
                 
                 new_items = [item for item in page_items if item['imdb_id'] not in seen_ids]
                 for item in new_items:
@@ -583,8 +606,9 @@ def get_imdb_list_data(list_id):
                 if page_response.status_code != 200:
                     break
                 
+                page_html = page_response.text
                 page_soup = BeautifulSoup(page_response.content, 'html.parser')
-                page_items = scrape_watchlist_page(page_soup, list_url)
+                page_items = scrape_watchlist_page(page_soup, list_url, page_html)
                 
                 new_items = [item for item in page_items if item['imdb_id'] not in seen_ids]
                 for item in new_items:
