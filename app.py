@@ -809,13 +809,6 @@ def sync_watchlist():
     add_log("=" * 50, 'info')
     add_log(f"Complete: {processed} processed, {added} added, {skipped} skipped, {removed} removed", 'success')
     add_log("=" * 50, 'info')
-        time.sleep(1.0)
-    
-    save_sync_results(results)
-    
-    add_log("=" * 50, 'info')
-    add_log(f"Complete: {processed} processed, {added} added, {skipped} skipped", 'success')
-    add_log("=" * 50, 'info')
 
 def schedule_sync():
     schedule.every(6).hours.do(sync_watchlist)
