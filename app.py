@@ -39,7 +39,8 @@ def load_config():
         'plexToken': '',
         'tmdbApiKey': '',
         'streamingServices': [],  # Now stores [{"id": 8, "region": "DE"}, ...]
-        'imdbCookie': ''
+        'imdbCookie': '',
+        'cleanupUnlistedEnabled': False
     }
 
 def save_config(config):
@@ -1043,6 +1044,8 @@ def get_plex_watchlist(plex_token):
         
         while True:
             params = {
+                'includeCollections': 1,
+                'includeExternalMedia': 1,
                 'X-Plex-Container-Start': offset,
                 'X-Plex-Container-Size': page_size
             }
@@ -1137,6 +1140,82 @@ def get_plex_watchlist(plex_token):
         import traceback
         add_log(f"Traceback: {traceback.format_exc()}", 'error')
         return []
+
+def cleanup_unlisted_plex_watchlist():
+    """Remove Plex watchlist items that are no longer present in the IMDB source list."""
+    config = load_config()
+
+    if not config.get('cleanupUnlistedEnabled'):
+        add_log("Weekly cleanup skipped because it is disabled", 'info')
+        return
+
+    if config.get('listSource', 'imdb') != 'imdb':
+        add_log("Cleanup skipped because the configured source is not IMDB", 'warning')
+        return
+
+    if not config.get('plexToken') or not config.get('imdbListUrl'):
+        add_log("Cleanup skipped. Plex Token and IMDB List URL are required.", 'error')
+        return
+
+    add_log("=" * 50, 'info')
+    add_log("Starting Plex cleanup for items not in IMDB watchlist", 'info')
+    add_log("=" * 50, 'info')
+
+    if not check_plex_watchlist_access(config['plexToken']):
+        add_log("Cleanup aborted because Plex watchlist access is not available", 'error')
+        return
+
+    imdb_items = get_imdb_watchlist(config['imdbListUrl'])
+    imdb_ids = {item.get('imdb_id') for item in imdb_items if item.get('imdb_id')}
+
+    if not imdb_ids:
+        add_log("Cleanup aborted because no IMDB source items were found", 'error')
+        return
+
+    plex_items = get_plex_watchlist(config['plexToken'])
+    if not plex_items:
+        add_log("Cleanup found no readable Plex watchlist items", 'warning')
+        return
+
+    stale_items = [
+        item for item in plex_items
+        if item.get('imdb_id') and item.get('imdb_id') not in imdb_ids
+    ]
+    unknown_id_count = len([item for item in plex_items if not item.get('imdb_id')])
+
+    add_log(
+        f"Cleanup comparison: {len(imdb_ids)} IMDB items, "
+        f"{len(plex_items)} Plex items, {len(stale_items)} stale items",
+        'info'
+    )
+    if unknown_id_count:
+        add_log(f"Cleanup skipped {unknown_id_count} Plex items without IMDB IDs", 'warning')
+
+    removed = 0
+    failed = 0
+
+    for index, item in enumerate(stale_items, start=1):
+        title = item.get('title') or item.get('imdb_id')
+        year = item.get('year')
+        imdb_id = item.get('imdb_id')
+
+        add_log(f"[cleanup {index}/{len(stale_items)}] Removing '{title}' not found in IMDB source", 'warning')
+        if remove_from_plex_watchlist(imdb_id, title, year, config['plexToken']):
+            removed += 1
+        else:
+            failed += 1
+        time.sleep(1.0)
+
+    stats = load_sync_stats()
+    stats.update({
+        'last_cleanup': datetime.now().isoformat(),
+        'cleanup_removed': removed,
+    })
+    save_sync_stats(stats)
+
+    add_log("=" * 50, 'info')
+    add_log(f"Cleanup complete: {removed} removed, {failed} failed", 'success')
+    add_log("=" * 50, 'info')
 
 def sync_watchlist():
     config = load_config()
@@ -1316,6 +1395,7 @@ def sync_watchlist():
 
 def schedule_sync():
     schedule.every(6).hours.do(sync_watchlist)
+    schedule.every().sunday.at("03:00").do(cleanup_unlisted_plex_watchlist)
     
     while True:
         schedule.run_pending()
@@ -1476,6 +1556,11 @@ def get_results():
 def trigger_sync():
     threading.Thread(target=sync_watchlist, daemon=True).start()
     return jsonify({'success': True, 'message': 'Sync started'})
+
+@app.route('/api/cleanup', methods=['POST'])
+def trigger_cleanup():
+    threading.Thread(target=cleanup_unlisted_plex_watchlist, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Cleanup started'})
 
 @app.route('/api/status', methods=['GET'])
 def get_status():

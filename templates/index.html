@@ -607,12 +607,20 @@
                         <label>Plex Token</label>
                         <input type="password" id="plexToken" placeholder="Your Plex authentication token">
                     </div>
+                    <div class="form-group" style="display:flex; align-items:flex-start; gap:10px;">
+                        <input type="checkbox" id="cleanupUnlistedEnabled" style="margin-top:4px;">
+                        <div>
+                            <label for="cleanupUnlistedEnabled" style="margin-bottom:4px;">Weekly Plex cleanup</label>
+                            <small style="color:#888;">Once a week, remove Plex watchlist items that are no longer on the configured IMDB watchlist.</small>
+                        </div>
+                    </div>
                     <div class="form-group">
                         <label>TMDB API Key</label>
                         <input type="password" id="tmdbKey" placeholder="Your TMDB API key (v3)">
                         <small style="color:#888;">Required for streaming availability checks and TMDB sources. Get a free key at <a href="https://www.themoviedb.org/settings/api" target="_blank" style="color:#667eea;">themoviedb.org</a></small>
                     </div>
                     <button class="btn" onclick="saveConfig()" style="margin-top: 4px;">💾 Save Configuration</button>
+                    <button class="btn" onclick="triggerCleanup()" style="margin-top: 4px; margin-left: 8px; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">🧹 Run Cleanup Now</button>
                 </div>
 
                 <div class="card">
@@ -821,6 +829,7 @@
                     document.getElementById('traktSuccessSection').style.display = 'block';
                 }
                 document.getElementById('plexToken').value = config.plexToken || '';
+                document.getElementById('cleanupUnlistedEnabled').checked = Boolean(config.cleanupUnlistedEnabled);
                 document.getElementById('tmdbKey').value = config.tmdbApiKey || '';
                 
                 // Load streaming services
@@ -901,6 +910,7 @@
                 traktApiKey: document.getElementById('traktApiKey').value,
                 traktClientSecret: document.getElementById('traktClientSecret').value,
                 plexToken: document.getElementById('plexToken').value,
+                cleanupUnlistedEnabled: document.getElementById('cleanupUnlistedEnabled').checked,
                 tmdbApiKey: document.getElementById('tmdbKey').value,
                 streamingServices: streamingServices
             };
@@ -917,6 +927,25 @@
                 }
             } catch (error) {
                 if (!silent) alert('❌ Error saving configuration: ' + error.message);
+            }
+        }
+
+        async function triggerCleanup() {
+            if (!confirm('Remove Plex watchlist items that are not on the configured IMDB watchlist?')) {
+                return;
+            }
+
+            await saveConfig(true);
+
+            try {
+                const response = await fetch('/api/cleanup', {method: 'POST'});
+                if (response.ok) {
+                    alert('Cleanup started. Check the logs for progress.');
+                } else {
+                    alert('Failed to start cleanup.');
+                }
+            } catch (error) {
+                alert('Error starting cleanup: ' + error.message);
             }
         }
         
