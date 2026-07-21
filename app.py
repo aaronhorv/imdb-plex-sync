@@ -771,6 +771,13 @@ def plex_request(method, url, **kwargs):
         raise last_error
     raise RuntimeError("Plex request failed")
 
+def plex_action_params(rating_key, plex_token):
+    """Build Plex action params; action endpoints require token in query params."""
+    return {
+        'ratingKey': rating_key,
+        'X-Plex-Token': plex_token,
+    }
+
 def search_and_verify_plex(imdb_id, title, year, plex_token):
     """Search Plex and verify IMDB ID matches"""
     try:
@@ -854,13 +861,15 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
         }
         
         watchlist_url = f"https://discover.provider.plex.tv/actions/addToWatchlist"
-        params = {'ratingKey': rating_key}
+        params = plex_action_params(rating_key, plex_token)
         
         response = plex_request('PUT', watchlist_url, headers=headers, params=params)
         
         if response.status_code in [200, 204]:
             add_log(f"✓ Added '{verified_title}'", 'success')
             return True
+
+        add_log(f"Failed to add '{title}': HTTP {response.status_code}", 'error')
         
         return False
         
@@ -884,7 +893,7 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
         
         # Note: Plex uses PUT (not DELETE) for removeFromWatchlist
         watchlist_url = f"https://discover.provider.plex.tv/actions/removeFromWatchlist"
-        params = {'ratingKey': rating_key}
+        params = plex_action_params(rating_key, plex_token)
         
         response = plex_request('PUT', watchlist_url, headers=headers, params=params)
         
