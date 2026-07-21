@@ -803,11 +803,56 @@ def plex_headers(plex_token):
     }
 
 def check_plex_watchlist_access(plex_token):
-    """Fail fast when the Plex token cannot access the Plex watchlist."""
+    """Fail fast when the Plex token is invalid or cannot access Plex Discover."""
     headers = plex_headers(plex_token)
 
     try:
         add_log("Checking Plex watchlist access...", 'info')
+        account_response = plex_request(
+            'GET',
+            "https://plex.tv/api/v2/user",
+            headers=headers,
+        )
+
+        if account_response.status_code in (401, 403):
+            add_log(
+                f"Plex token is not accepted by plex.tv: HTTP {account_response.status_code}",
+                'error'
+            )
+            return False
+        if account_response.status_code != 200:
+            add_log(
+                f"Plex account token check failed: HTTP {account_response.status_code}",
+                'error'
+            )
+            return False
+
+        search_response = plex_request(
+            'GET',
+            "https://discover.provider.plex.tv/library/search",
+            headers=headers,
+            params={
+                'query': 'test',
+                'limit': 1,
+                'searchTypes': 'movies,tv',
+                'includeMetadata': 1,
+                'searchProviders': 'discover',
+            },
+        )
+
+        if search_response.status_code in (401, 403):
+            add_log(
+                f"Plex token cannot access Discover search: HTTP {search_response.status_code}",
+                'error'
+            )
+            return False
+        if search_response.status_code != 200:
+            add_log(
+                f"Plex Discover search access check failed: HTTP {search_response.status_code}",
+                'error'
+            )
+            return False
+
         watchlist_response = plex_request(
             'GET',
             "https://discover.provider.plex.tv/library/sections/watchlist/all",
@@ -815,8 +860,6 @@ def check_plex_watchlist_access(plex_token):
             params={
                 'includeCollections': 1,
                 'includeExternalMedia': 1,
-                'X-Plex-Container-Start': 0,
-                'X-Plex-Container-Size': 1,
             },
         )
 
@@ -828,17 +871,19 @@ def check_plex_watchlist_access(plex_token):
             return False
         if watchlist_response.status_code != 200:
             add_log(
-                f"Plex watchlist access check failed: HTTP {watchlist_response.status_code}",
-                'error'
+                f"Plex watchlist read check was inconclusive: HTTP {watchlist_response.status_code}",
+                'warning'
             )
             if watchlist_response.text:
-                add_log(f"Plex watchlist access response: {watchlist_response.text[:200]}", 'error')
-            return False
+                add_log(f"Plex watchlist read response: {watchlist_response.text[:200]}", 'warning')
+            add_log("Plex account and Discover checks passed; continuing sync", 'warning')
+            return True
 
         data = watchlist_response.json()
         if 'MediaContainer' not in data:
-            add_log("Plex watchlist access check returned an unexpected response", 'error')
-            return False
+            add_log("Plex watchlist read returned an unexpected response", 'warning')
+            add_log("Plex account and Discover checks passed; continuing sync", 'warning')
+            return True
 
         add_log("Plex watchlist access check passed", 'success')
         return True
