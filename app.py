@@ -787,6 +787,45 @@ def plex_watchlist_action_key(metadata, fallback_rating_key):
         return guid.rsplit('/', 1)[-1]
     return fallback_rating_key
 
+def extract_imdb_id_from_plex_metadata(item):
+    """Extract an IMDB ID from Plex metadata in any known GUID shape."""
+    candidates = []
+
+    for key in ('guid', 'key'):
+        value = item.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+
+    for guid_obj in item.get('Guid', []) or []:
+        guid_id = guid_obj.get('id')
+        if isinstance(guid_id, str):
+            candidates.append(guid_id)
+
+    for candidate in candidates:
+        match = re.search(r'(tt\d+)', candidate)
+        if match:
+            return match.group(1)
+
+    return None
+
+def get_plex_metadata_by_rating_key(rating_key, plex_token):
+    """Fetch full Plex metadata for a rating key."""
+    if not rating_key:
+        return None
+
+    response = plex_request(
+        'GET',
+        f"https://discover.provider.plex.tv/library/metadata/{rating_key}",
+        headers=plex_headers(plex_token),
+    )
+
+    if response.status_code != 200:
+        add_log(f"Could not fetch Plex metadata for rating key {rating_key}: HTTP {response.status_code}", 'warning')
+        return None
+
+    metadata_items = response.json().get('MediaContainer', {}).get('Metadata', [])
+    return metadata_items[0] if metadata_items else None
+
 def plex_headers(plex_token):
     """Build Plex headers used by Discover and provider action endpoints."""
     return {
@@ -936,24 +975,13 @@ def search_and_verify_plex(imdb_id, title, year, plex_token):
                     if not rating_key:
                         continue
                     
-                    metadata_url = f"https://discover.provider.plex.tv/library/metadata/{rating_key}"
-                    meta_response = plex_request('GET', metadata_url, headers=headers)
-                    
-                    if meta_response.status_code == 200:
-                        meta_data = meta_response.json()
-                        full_metadata = meta_data.get('MediaContainer', {}).get('Metadata', [])
-                        
-                        if full_metadata:
-                            guids = full_metadata[0].get('Guid', [])
-                            found_title = full_metadata[0].get('title', '')
-                            found_year = full_metadata[0].get('year', '')
-                            
-                            for guid in guids:
-                                guid_id = guid.get('id', '')
-                                if imdb_id in guid_id:
-                                    action_key = plex_watchlist_action_key(full_metadata[0], rating_key)
-                                    add_log(f"✓ MATCH: '{found_title}' ({found_year})", 'success')
-                                    return action_key, found_title
+                    full_metadata = get_plex_metadata_by_rating_key(rating_key, plex_token)
+                    if full_metadata and extract_imdb_id_from_plex_metadata(full_metadata) == imdb_id:
+                        found_title = full_metadata.get('title', '')
+                        found_year = full_metadata.get('year', '')
+                        action_key = plex_watchlist_action_key(full_metadata, rating_key)
+                        add_log(f"✓ MATCH: '{found_title}' ({found_year})", 'success')
+                        return action_key, found_title
         
         return None, None
         
@@ -1076,45 +1104,21 @@ def get_plex_watchlist(plex_token):
             
             # Process items from this page
             for item in container['Metadata']:
-                # Try to extract IMDB ID from guid or key
-                imdb_id = None
-                
-                # Method 1: Check the 'guid' field directly
-                guid = item.get('guid', '')
-                if 'imdb://' in guid:
-                    imdb_id = guid.split('imdb://')[-1].split('/')[0]
-                
-                # Method 2: Check Guid array
-                if not imdb_id and 'Guid' in item:
-                    for guid_obj in item['Guid']:
-                        guid_id = guid_obj.get('id', '')
-                        if 'imdb://' in guid_id:
-                            imdb_id = guid_id.split('imdb://')[-1].split('/')[0]
-                            break
-                        elif guid_id.startswith('tt'):
-                            imdb_id = guid_id
-                            break
-                
-                # Method 3: Try to get from key
-                if not imdb_id:
-                    key = item.get('key', '')
-                    if 'tt' in key:
-                        # Extract ttXXXXXX pattern
-                        import re
-                        match = re.search(r'(tt\d+)', key)
-                        if match:
-                            imdb_id = match.group(1)
+                imdb_id = extract_imdb_id_from_plex_metadata(item)
+                full_item = item
+
+                if not imdb_id and item.get('ratingKey'):
+                    full_metadata = get_plex_metadata_by_rating_key(item.get('ratingKey'), plex_token)
+                    if full_metadata:
+                        full_item = full_metadata
+                        imdb_id = extract_imdb_id_from_plex_metadata(full_metadata)
                 
                 if imdb_id:
-                    # Clean up IMDB ID
-                    if not imdb_id.startswith('tt'):
-                        imdb_id = 'tt' + imdb_id
-                    
                     all_items.append({
                         'imdb_id': imdb_id,
-                        'title': item.get('title'),
-                        'year': item.get('year'),
-                        'rating_key': item.get('ratingKey')
+                        'title': full_item.get('title') or item.get('title'),
+                        'year': full_item.get('year') or item.get('year'),
+                        'rating_key': full_item.get('ratingKey') or item.get('ratingKey')
                     })
                     add_log(f"Found in Plex watchlist: {item.get('title')} ({item.get('year')}) - IMDB: {imdb_id}", 'info')
                 else:
@@ -1132,7 +1136,8 @@ def get_plex_watchlist(plex_token):
             if offset >= total_size:
                 break
         
-        add_log(f"Total items with IMDB IDs in Plex watchlist: {len(all_items)}", 'info')
+        with_imdb_id = len([item for item in all_items if item.get('imdb_id')])
+        add_log(f"Total Plex watchlist items: {len(all_items)} ({with_imdb_id} with IMDB IDs)", 'info')
         return all_items
         
     except Exception as e:
@@ -1190,6 +1195,11 @@ def cleanup_unlisted_plex_watchlist():
     )
     if unknown_id_count:
         add_log(f"Cleanup skipped {unknown_id_count} Plex items without IMDB IDs", 'warning')
+    if stale_items:
+        preview = ", ".join((item.get('title') or item.get('imdb_id')) for item in stale_items[:10])
+        add_log(f"Cleanup stale item preview: {preview}", 'warning')
+    else:
+        add_log("Cleanup found no Plex items with IMDB IDs missing from the IMDB source", 'info')
 
     removed = 0
     failed = 0
