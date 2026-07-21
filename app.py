@@ -17,6 +17,8 @@ CONFIG_FILE = '/config/config.json'
 LOGS_FILE = '/config/logs.json'
 RESULTS_FILE = '/config/sync_results.json'
 STATS_FILE = '/config/sync_stats.json'
+PLEX_REQUEST_TIMEOUT = (5, 30)
+PLEX_REQUEST_RETRIES = 3
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -738,6 +740,37 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
         add_log(f"Traceback: {traceback.format_exc()}", 'error')
         return False, []
 
+def plex_request(method, url, **kwargs):
+    """Make a Plex Discover request with retries for transient slow responses."""
+    kwargs.setdefault('timeout', PLEX_REQUEST_TIMEOUT)
+    last_error = None
+
+    for attempt in range(1, PLEX_REQUEST_RETRIES + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code in (429, 500, 502, 503, 504):
+                add_log(
+                    f"Plex request returned HTTP {response.status_code} "
+                    f"(attempt {attempt}/{PLEX_REQUEST_RETRIES})",
+                    'warning'
+                )
+                last_error = requests.HTTPError(f"HTTP {response.status_code}", response=response)
+            else:
+                return response
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            add_log(
+                f"Plex request failed (attempt {attempt}/{PLEX_REQUEST_RETRIES}): {str(e)}",
+                'warning'
+            )
+
+        if attempt < PLEX_REQUEST_RETRIES:
+            time.sleep(2 * attempt)
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Plex request failed")
+
 def search_and_verify_plex(imdb_id, title, year, plex_token):
     """Search Plex and verify IMDB ID matches"""
     try:
@@ -762,7 +795,7 @@ def search_and_verify_plex(imdb_id, title, year, plex_token):
                 'searchProviders': 'discover,plexAVOD'
             }
             
-            response = requests.get(search_url, headers=headers, params=params, timeout=10)
+            response = plex_request('GET', search_url, headers=headers, params=params)
             
             if response.status_code != 200:
                 continue
@@ -784,7 +817,7 @@ def search_and_verify_plex(imdb_id, title, year, plex_token):
                         continue
                     
                     metadata_url = f"https://discover.provider.plex.tv/library/metadata/{rating_key}"
-                    meta_response = requests.get(metadata_url, headers=headers, timeout=10)
+                    meta_response = plex_request('GET', metadata_url, headers=headers)
                     
                     if meta_response.status_code == 200:
                         meta_data = meta_response.json()
@@ -823,7 +856,7 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
         watchlist_url = f"https://discover.provider.plex.tv/actions/addToWatchlist"
         params = {'ratingKey': rating_key}
         
-        response = requests.put(watchlist_url, headers=headers, params=params, timeout=10)
+        response = plex_request('PUT', watchlist_url, headers=headers, params=params)
         
         if response.status_code in [200, 204]:
             add_log(f"✓ Added '{verified_title}'", 'success')
@@ -853,7 +886,7 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
         watchlist_url = f"https://discover.provider.plex.tv/actions/removeFromWatchlist"
         params = {'ratingKey': rating_key}
         
-        response = requests.put(watchlist_url, headers=headers, params=params, timeout=10)
+        response = plex_request('PUT', watchlist_url, headers=headers, params=params)
         
         if response.status_code in [200, 204]:
             add_log(f"✓ Removed '{verified_title}' from Plex watchlist", 'success')
@@ -893,7 +926,7 @@ def get_plex_watchlist(plex_token):
                 'X-Plex-Container-Size': page_size
             }
             
-            response = requests.get(watchlist_url, headers=headers, params=params, timeout=10)
+            response = plex_request('GET', watchlist_url, headers=headers, params=params)
             
             add_log(f"Plex watchlist response: {response.status_code}", 'info')
             
