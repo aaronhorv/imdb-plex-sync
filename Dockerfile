@@ -11,9 +11,11 @@ WORKDIR /app
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN playwright install --with-deps chromium
 
-# Copy application file and templates
+# Copy application files and templates
 COPY app.py .
+COPY imdb_scraper.py .
 COPY templates/ templates/
 
 # Create config directory

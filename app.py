@@ -9,6 +9,8 @@ import schedule
 import threading
 import re
 
+from imdb_scraper import scrape_imdb_watchlist
+
 app = Flask(__name__)
 
 CONFIG_FILE = '/config/config.json'
@@ -352,6 +354,22 @@ def parse_csv_export(csv_text):
 def get_imdb_watchlist(list_url):
     """Main function to get IMDB watchlist items"""
     try:
+        config = load_config()
+        imdb_cookie = config.get('imdbCookie', '').strip()
+
+        try:
+            items = scrape_imdb_watchlist(
+                list_url=list_url,
+                imdb_cookie=imdb_cookie,
+                logger=add_log,
+            )
+            if items:
+                add_log(f"Playwright IMDB scrape successful: {len(items)} items found", 'success')
+                return items
+            add_log("Playwright IMDB scrape returned no items; using fallback scraper", 'warning')
+        except Exception as e:
+            add_log(f"Playwright IMDB scrape failed; using fallback scraper: {str(e)}", 'warning')
+
         # Check if it's a list URL (either /list/lsXXX or /user/urXXX/watchlist)
         list_match = re.search(r'/list/(ls\d+)', list_url)
         user_match = re.search(r'user/(ur\d+)', list_url)
