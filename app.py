@@ -779,6 +779,13 @@ def plex_action_params(rating_key, plex_token):
         'X-Plex-Token': plex_token,
     }
 
+def plex_watchlist_action_key(metadata, fallback_rating_key):
+    """Return the Plex online metadata key expected by watchlist actions."""
+    guid = metadata.get('guid', '')
+    if guid and '/' in guid:
+        return guid.rsplit('/', 1)[-1]
+    return fallback_rating_key
+
 def plex_headers(plex_token):
     """Build Plex headers used by Discover and provider action endpoints."""
     return {
@@ -897,8 +904,9 @@ def search_and_verify_plex(imdb_id, title, year, plex_token):
                             for guid in guids:
                                 guid_id = guid.get('id', '')
                                 if imdb_id in guid_id:
+                                    action_key = plex_watchlist_action_key(full_metadata[0], rating_key)
                                     add_log(f"✓ MATCH: '{found_title}' ({found_year})", 'success')
-                                    return rating_key, found_title
+                                    return action_key, found_title
         
         return None, None
         
@@ -925,7 +933,11 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
             add_log(f"✓ Added '{verified_title}'", 'success')
             return True
 
-        add_log(f"Failed to add '{title}': HTTP {response.status_code}", 'error')
+        add_log(
+            f"Failed to add '{title}': HTTP {response.status_code} "
+            f"(Plex action key length: {len(str(rating_key))})",
+            'error'
+        )
         
         return False
         
@@ -958,7 +970,11 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
             add_log(f"'{verified_title}' not on Plex watchlist (was never added)", 'info')
             return False
         else:
-            add_log(f"Failed to remove '{title}': HTTP {response.status_code}", 'error')
+            add_log(
+                f"Failed to remove '{title}': HTTP {response.status_code} "
+                f"(Plex action key length: {len(str(rating_key))})",
+                'error'
+            )
             return False
         
     except Exception as e:
