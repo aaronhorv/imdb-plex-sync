@@ -808,6 +808,39 @@ def extract_imdb_id_from_plex_metadata(item):
 
     return None
 
+def normalize_match_title(title):
+    """Normalize titles for cleanup comparison between Plex and IMDB."""
+    if not title:
+        return ''
+    title = re.sub(r'\s+', ' ', str(title)).strip().lower()
+    title = re.sub(r'^(the|a|an)\s+', '', title)
+    title = re.sub(r'[^a-z0-9]+', '', title)
+    return title
+
+def item_title_year_key(item):
+    """Build a title/year key for cleanup fallback matching."""
+    title = normalize_match_title(item.get('title'))
+    year = str(item.get('year') or '').strip()
+    if not title:
+        return None
+    return (title, year)
+
+def plex_item_exists_in_source(plex_item, imdb_ids, imdb_title_keys):
+    """Return True when a Plex watchlist item is present in the IMDB source list."""
+    imdb_id = plex_item.get('imdb_id')
+    if imdb_id and imdb_id in imdb_ids:
+        return True
+
+    title_key = item_title_year_key(plex_item)
+    if title_key and title_key in imdb_title_keys:
+        return True
+
+    if title_key:
+        title_only_key = (title_key[0], '')
+        return title_only_key in imdb_title_keys
+
+    return False
+
 def get_plex_metadata_by_rating_key(rating_key, plex_token):
     """Fetch full Plex metadata for a rating key."""
     if not rating_key:
@@ -1172,6 +1205,11 @@ def cleanup_unlisted_plex_watchlist():
 
     imdb_items = get_imdb_watchlist(config['imdbListUrl'])
     imdb_ids = {item.get('imdb_id') for item in imdb_items if item.get('imdb_id')}
+    imdb_title_keys = {
+        item_title_year_key(item)
+        for item in imdb_items
+        if item_title_year_key(item)
+    }
 
     if not imdb_ids:
         add_log("Cleanup aborted because no IMDB source items were found", 'error')
@@ -1184,13 +1222,28 @@ def cleanup_unlisted_plex_watchlist():
 
     stale_items = [
         item for item in plex_items
-        if item.get('imdb_id') and item.get('imdb_id') not in imdb_ids
+        if not plex_item_exists_in_source(item, imdb_ids, imdb_title_keys)
     ]
     unknown_id_count = len([item for item in plex_items if not item.get('imdb_id')])
+    matched_by_id_count = len([
+        item for item in plex_items
+        if item.get('imdb_id') and item.get('imdb_id') in imdb_ids
+    ])
+    matched_by_title_count = len([
+        item for item in plex_items
+        if not (item.get('imdb_id') and item.get('imdb_id') in imdb_ids)
+        and item_title_year_key(item)
+        and item_title_year_key(item) in imdb_title_keys
+    ])
 
     add_log(
-        f"Cleanup comparison: {len(imdb_ids)} IMDB items, "
+        f"Cleanup comparison: {len(imdb_ids)} IMDB IDs, {len(imdb_title_keys)} IMDB title keys, "
         f"{len(plex_items)} Plex items, {len(stale_items)} stale items",
+        'info'
+    )
+    add_log(
+        f"Cleanup matches: {matched_by_id_count} by IMDB ID, "
+        f"{matched_by_title_count} by title/year",
         'info'
     )
     if unknown_id_count:
