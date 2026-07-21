@@ -795,6 +795,72 @@ def plex_headers(plex_token):
         'Accept': 'application/json',
     }
 
+def check_plex_watchlist_access(plex_token):
+    """Fail fast when the Plex token cannot access watchlist/provider APIs."""
+    headers = plex_headers(plex_token)
+
+    try:
+        add_log("Checking Plex watchlist access...", 'info')
+        watchlist_response = plex_request(
+            'GET',
+            "https://discover.provider.plex.tv/library/sections/watchlist/all",
+            headers=headers,
+            params={
+                'X-Plex-Container-Start': 0,
+                'X-Plex-Container-Size': 1,
+            },
+        )
+
+        if watchlist_response.status_code in (401, 403):
+            add_log(
+                f"Plex token cannot access the watchlist: HTTP {watchlist_response.status_code}",
+                'error'
+            )
+            return False
+        if watchlist_response.status_code != 200:
+            add_log(
+                f"Plex watchlist access check failed: HTTP {watchlist_response.status_code}",
+                'error'
+            )
+            return False
+
+        data = watchlist_response.json()
+        if 'MediaContainer' not in data:
+            add_log("Plex watchlist access check returned an unexpected response", 'error')
+            return False
+
+        provider_response = plex_request(
+            'GET',
+            "https://metadata.provider.plex.tv",
+            headers=headers,
+        )
+
+        if provider_response.status_code in (401, 403):
+            add_log(
+                f"Plex token cannot access provider actions: HTTP {provider_response.status_code}",
+                'error'
+            )
+            return False
+        if provider_response.status_code != 200:
+            add_log(
+                f"Plex provider action check failed: HTTP {provider_response.status_code}",
+                'error'
+            )
+            return False
+
+        provider_data = provider_response.json()
+        provider_text = json.dumps(provider_data)
+        if 'addToWatchlist' not in provider_text or 'removeFromWatchlist' not in provider_text:
+            add_log("Plex provider did not advertise watchlist actions", 'error')
+            return False
+
+        add_log("Plex watchlist access check passed", 'success')
+        return True
+
+    except Exception as e:
+        add_log(f"Plex watchlist access check failed: {str(e)}", 'error')
+        return False
+
 def search_and_verify_plex(imdb_id, title, year, plex_token):
     """Search Plex and verify IMDB ID matches"""
     try:
@@ -923,10 +989,7 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
 def get_plex_watchlist(plex_token):
     """Get all items currently in Plex watchlist"""
     try:
-        headers = {
-            'X-Plex-Token': plex_token,
-            'Accept': 'application/json'
-        }
+        headers = plex_headers(plex_token)
         
         # Get watchlist from Plex (discover endpoint is correct)
         watchlist_url = "https://discover.provider.plex.tv/library/sections/watchlist/all"
@@ -1061,6 +1124,10 @@ def sync_watchlist():
     add_log("Starting sync", 'info')
     add_log(f"List source: {list_source}", 'info')
     add_log("=" * 50, 'info')
+
+    if not check_plex_watchlist_access(config['plexToken']):
+        add_log("Sync aborted because Plex watchlist access is not available", 'error')
+        return
 
     # Step 1: Fetch items from the configured source
     if list_source == 'imdb':
