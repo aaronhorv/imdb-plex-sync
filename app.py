@@ -796,85 +796,44 @@ def plex_headers(plex_token):
     }
 
 def check_plex_watchlist_access(plex_token):
-    """Fail fast when the Plex token cannot access watchlist/provider APIs."""
+    """Fail fast when the Plex token cannot access the Plex watchlist."""
     headers = plex_headers(plex_token)
 
     try:
         add_log("Checking Plex watchlist access...", 'info')
-        watchlist_checked = False
-        watchlist_urls = [
-            "https://discover.provider.plex.tv/library/sections/watchlist/all",
-            "https://metadata.provider.plex.tv/library/sections/watchlist/all",
-        ]
-
-        for watchlist_url in watchlist_urls:
-            watchlist_response = plex_request(
-                'GET',
-                watchlist_url,
-                headers=headers,
-            )
-
-            if watchlist_response.status_code in (401, 403):
-                add_log(
-                    f"Plex token cannot access the watchlist: HTTP {watchlist_response.status_code}",
-                    'error'
-                )
-                return False
-            if watchlist_response.status_code != 200:
-                add_log(
-                    f"Plex watchlist read check was inconclusive at {watchlist_url}: "
-                    f"HTTP {watchlist_response.status_code}",
-                    'warning'
-                )
-                if watchlist_response.text:
-                    add_log(f"Plex watchlist read response: {watchlist_response.text[:200]}", 'warning')
-                continue
-
-            data = watchlist_response.json()
-            if 'MediaContainer' in data:
-                watchlist_checked = True
-                break
-
-            add_log(
-                f"Plex watchlist read check returned an unexpected response at {watchlist_url}",
-                'warning'
-            )
-
-        if not watchlist_checked:
-            add_log(
-                "Plex watchlist read access could not be confirmed; checking provider actions next",
-                'warning'
-            )
-
-        provider_response = plex_request(
+        watchlist_response = plex_request(
             'GET',
-            "https://metadata.provider.plex.tv",
+            "https://discover.provider.plex.tv/library/sections/watchlist/all",
             headers=headers,
+            params={
+                'includeCollections': 1,
+                'includeExternalMedia': 1,
+                'X-Plex-Container-Start': 0,
+                'X-Plex-Container-Size': 1,
+            },
         )
 
-        if provider_response.status_code in (401, 403):
+        if watchlist_response.status_code in (401, 403):
             add_log(
-                f"Plex token cannot access provider actions: HTTP {provider_response.status_code}",
+                f"Plex token cannot access the watchlist: HTTP {watchlist_response.status_code}",
                 'error'
             )
             return False
-        if provider_response.status_code != 200:
+        if watchlist_response.status_code != 200:
             add_log(
-                f"Plex provider action check failed: HTTP {provider_response.status_code}",
+                f"Plex watchlist access check failed: HTTP {watchlist_response.status_code}",
                 'error'
             )
+            if watchlist_response.text:
+                add_log(f"Plex watchlist access response: {watchlist_response.text[:200]}", 'error')
             return False
 
-        provider_data = provider_response.json()
-        provider_text = json.dumps(provider_data)
-        if 'addToWatchlist' not in provider_text or 'removeFromWatchlist' not in provider_text:
-            add_log("Plex provider did not advertise watchlist actions", 'error')
+        data = watchlist_response.json()
+        if 'MediaContainer' not in data:
+            add_log("Plex watchlist access check returned an unexpected response", 'error')
             return False
 
-        if watchlist_checked:
-            add_log("Plex watchlist access check passed", 'success')
-        else:
-            add_log("Plex provider action check passed; watchlist read check was inconclusive", 'warning')
+        add_log("Plex watchlist access check passed", 'success')
         return True
 
     except Exception as e:
@@ -957,7 +916,7 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
         
         headers = plex_headers(plex_token)
         
-        watchlist_url = f"https://metadata.provider.plex.tv/actions/addToWatchlist"
+        watchlist_url = f"https://discover.provider.plex.tv/actions/addToWatchlist"
         params = plex_action_params(rating_key, plex_token)
         
         response = plex_request('PUT', watchlist_url, headers=headers, params=params)
@@ -986,7 +945,7 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
         headers = plex_headers(plex_token)
         
         # Note: Plex uses PUT (not DELETE) for removeFromWatchlist
-        watchlist_url = f"https://metadata.provider.plex.tv/actions/removeFromWatchlist"
+        watchlist_url = f"https://discover.provider.plex.tv/actions/removeFromWatchlist"
         params = plex_action_params(rating_key, plex_token)
         
         response = plex_request('PUT', watchlist_url, headers=headers, params=params)
