@@ -19,6 +19,7 @@ RESULTS_FILE = '/config/sync_results.json'
 STATS_FILE = '/config/sync_stats.json'
 PLEX_REQUEST_TIMEOUT = (5, 30)
 PLEX_REQUEST_RETRIES = 3
+PLEX_CLIENT_IDENTIFIER = 'watchlist-plex-sync'
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -778,13 +779,26 @@ def plex_action_params(rating_key, plex_token):
         'X-Plex-Token': plex_token,
     }
 
+def plex_headers(plex_token):
+    """Build Plex headers used by Discover and provider action endpoints."""
+    return {
+        'X-Plex-Token': plex_token,
+        'X-Plex-Product': 'Watchlist Plex Sync',
+        'X-Plex-Version': '1.0',
+        'X-Plex-Client-Identifier': PLEX_CLIENT_IDENTIFIER,
+        'X-Plex-Platform': 'Docker',
+        'X-Plex-Device': 'watchlist-plex-sync',
+        'X-Plex-Device-Name': 'watchlist-plex-sync',
+        'X-Plex-Provider-Version': '1.3',
+        'X-Plex-Language': 'en',
+        'Accept-Language': 'en',
+        'Accept': 'application/json',
+    }
+
 def search_and_verify_plex(imdb_id, title, year, plex_token):
     """Search Plex and verify IMDB ID matches"""
     try:
-        headers = {
-            'X-Plex-Token': plex_token,
-            'Accept': 'application/json'
-        }
+        headers = plex_headers(plex_token)
         
         search_url = "https://discover.provider.plex.tv/library/search"
         
@@ -855,12 +869,9 @@ def add_to_plex_watchlist(imdb_id, title, year, plex_token):
         if not rating_key:
             return False
         
-        headers = {
-            'X-Plex-Token': plex_token,
-            'Accept': 'application/json'
-        }
+        headers = plex_headers(plex_token)
         
-        watchlist_url = f"https://discover.provider.plex.tv/actions/addToWatchlist"
+        watchlist_url = f"https://metadata.provider.plex.tv/actions/addToWatchlist"
         params = plex_action_params(rating_key, plex_token)
         
         response = plex_request('PUT', watchlist_url, headers=headers, params=params)
@@ -886,13 +897,10 @@ def remove_from_plex_watchlist(imdb_id, title, year, plex_token):
             add_log(f"Could not find '{title}' in Plex library", 'info')
             return False
         
-        headers = {
-            'X-Plex-Token': plex_token,
-            'Accept': 'application/json'
-        }
+        headers = plex_headers(plex_token)
         
         # Note: Plex uses PUT (not DELETE) for removeFromWatchlist
-        watchlist_url = f"https://discover.provider.plex.tv/actions/removeFromWatchlist"
+        watchlist_url = f"https://metadata.provider.plex.tv/actions/removeFromWatchlist"
         params = plex_action_params(rating_key, plex_token)
         
         response = plex_request('PUT', watchlist_url, headers=headers, params=params)
