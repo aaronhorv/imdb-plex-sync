@@ -796,7 +796,7 @@ def plex_headers(plex_token):
         'X-Plex-Platform': 'Docker',
         'X-Plex-Device': 'watchlist-plex-sync',
         'X-Plex-Device-Name': 'watchlist-plex-sync',
-        'X-Plex-Provider-Version': '1.3',
+        'X-Plex-Provider-Version': '6.5.0',
         'X-Plex-Language': 'en',
         'Accept-Language': 'en',
         'Accept': 'application/json',
