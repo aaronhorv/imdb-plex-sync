@@ -848,10 +848,11 @@ def check_plex_watchlist_access(plex_token):
             return False
         if search_response.status_code != 200:
             add_log(
-                f"Plex Discover search access check failed: HTTP {search_response.status_code}",
-                'error'
+                f"Plex Discover search check was inconclusive: HTTP {search_response.status_code}",
+                'warning'
             )
-            return False
+            if search_response.text:
+                add_log(f"Plex Discover search response: {search_response.text[:200]}", 'warning')
 
         watchlist_response = plex_request(
             'GET',
