@@ -9,7 +9,7 @@ import schedule
 import threading
 import re
 
-from imdb_scraper import parse_imdb_csv, scrape_imdb_watchlist
+from imdb_scraper import parse_imdb_cookie_string, parse_imdb_csv, scrape_imdb_watchlist
 
 app = Flask(__name__)
 
@@ -97,6 +97,18 @@ def extract_user_id(url):
     if match:
         return match.group(1)
     return None
+
+def apply_imdb_cookies(session, imdb_cookie):
+    """Apply configured IMDb cookies to a requests session."""
+    cookies = parse_imdb_cookie_string(imdb_cookie)
+    for cookie in cookies:
+        session.cookies.set(
+            cookie['name'],
+            cookie['value'],
+            domain=cookie.get('domain', '.imdb.com'),
+            path=cookie.get('path', '/')
+        )
+    return len(cookies)
 
 def scrape_watchlist_page(soup, url, html_content=None):
     """Scrape watchlist page for IMDB IDs using JSON extraction - gets ALL titles"""
@@ -263,8 +275,8 @@ def get_imdb_export_data(user_id):
 
         imdb_cookie = load_config().get('imdbCookie', '').strip()
         if imdb_cookie:
-            session.cookies.set('at-main', imdb_cookie, domain='.imdb.com')
-            add_log("Using IMDB session cookie for authenticated request", 'info')
+            cookie_count = apply_imdb_cookies(session, imdb_cookie)
+            add_log(f"Using IMDB cookies for authenticated request ({cookie_count} cookies)", 'info')
 
         add_log(f"Fetching watchlist page for {user_id}...", 'info')
         response = session.get(watchlist_url, headers=headers, timeout=20)
@@ -388,8 +400,8 @@ def get_imdb_list_data(list_id):
 
         imdb_cookie = load_config().get('imdbCookie', '').strip()
         if imdb_cookie:
-            session.cookies.set('at-main', imdb_cookie, domain='.imdb.com')
-            add_log("Using IMDB session cookie for authenticated request", 'info')
+            cookie_count = apply_imdb_cookies(session, imdb_cookie)
+            add_log(f"Using IMDB cookies for authenticated request ({cookie_count} cookies)", 'info')
 
         add_log(f"Using list ID: {list_id}", 'info')
 

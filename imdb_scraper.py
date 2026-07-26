@@ -6,6 +6,7 @@ import csv
 import io
 import re
 import time
+from http.cookies import SimpleCookie
 from typing import Any, Callable
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -44,7 +45,7 @@ def scrape_imdb_watchlist(
 
     Args:
         list_url: IMDb watchlist or list URL to scrape.
-        imdb_cookie: Optional IMDb ``at-main`` cookie value for private lists.
+        imdb_cookie: Optional IMDb ``at-main`` value or full Cookie header.
         logger: Optional callable logger. Supports ``logger(message)`` and
             ``logger(message, level)`` styles.
 
@@ -104,21 +105,10 @@ def scrape_imdb_watchlist(
                 ),
             )
 
-            if imdb_cookie:
-                context.add_cookies(
-                    [
-                        {
-                            "name": "at-main",
-                            "value": imdb_cookie,
-                            "domain": ".imdb.com",
-                            "path": "/",
-                            "secure": True,
-                            "httpOnly": True,
-                            "sameSite": "Lax",
-                        }
-                    ]
-                )
-                _log(logger, "IMDb cookie authentication enabled", "info")
+            imdb_cookies = parse_imdb_cookie_string(imdb_cookie)
+            if imdb_cookies:
+                context.add_cookies(imdb_cookies)
+                _log(logger, f"IMDb cookie authentication enabled ({len(imdb_cookies)} cookies)", "info")
 
             page = context.new_page()
             page.set_default_timeout(15_000)
@@ -201,6 +191,48 @@ def parse_imdb_csv(csv_text: str, logger=None) -> list[dict]:
         raise ImdbCsvParseError(f"CSV contained no valid IMDb IDs; headers were {headers}")
 
     return items
+
+
+def parse_imdb_cookie_string(cookie_value: str) -> list[dict[str, Any]]:
+    """Parse an IMDb at-main value or full Cookie header into Playwright cookies."""
+    cookie_value = (cookie_value or "").strip()
+    if not cookie_value:
+        return []
+
+    if cookie_value.lower().startswith("cookie:"):
+        cookie_value = cookie_value.split(":", 1)[1].strip()
+
+    parsed: dict[str, str] = {}
+
+    if "=" not in cookie_value:
+        parsed["at-main"] = cookie_value
+    else:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(cookie_value)
+            parsed = {key: morsel.value for key, morsel in cookie.items() if morsel.value}
+        except Exception:
+            for part in cookie_value.split(";"):
+                if "=" not in part:
+                    continue
+                name, value = part.split("=", 1)
+                name = name.strip()
+                value = value.strip()
+                if name and value:
+                    parsed[name] = value
+
+    return [
+        {
+            "name": name,
+            "value": value,
+            "domain": ".imdb.com",
+            "path": "/",
+            "secure": True,
+            "httpOnly": name in {"at-main", "session-id", "ubid-main"},
+            "sameSite": "Lax",
+        }
+        for name, value in parsed.items()
+    ]
 
 
 def _scrape_via_csv_export(page: Page, logger) -> tuple[list[dict], str]:
