@@ -9,7 +9,7 @@ import schedule
 import threading
 import re
 
-from imdb_scraper import scrape_imdb_watchlist
+from imdb_scraper import parse_imdb_csv, scrape_imdb_watchlist
 
 app = Flask(__name__)
 
@@ -319,41 +319,11 @@ def get_imdb_export_data(user_id):
 
 def parse_csv_export(csv_text):
     """Parse IMDB CSV export"""
-    items = []
-    lines = csv_text.strip().split('\n')
-    
-    if len(lines) < 2:
-        return items
-    
-    headers = lines[0].split(',')
-    
-    const_idx = None
-    title_idx = None
-    
-    for i, header in enumerate(headers):
-        if 'Const' in header:
-            const_idx = i
-        if 'Title' in header:
-            title_idx = i
-    
-    if const_idx is None:
-        add_log("Could not find 'Const' column in CSV", 'error')
-        return items
-    
-    for line in lines[1:]:
-        parts = line.split(',')
-        if len(parts) > const_idx:
-            imdb_id = parts[const_idx].strip('"')
-            title = parts[title_idx].strip('"') if title_idx and len(parts) > title_idx else imdb_id
-            
-            if imdb_id.startswith('tt'):
-                items.append({
-                    'title': title,
-                    'imdb_id': imdb_id,
-                    'link': f"https://www.imdb.com/title/{imdb_id}/"
-                })
-    
-    return items
+    try:
+        return parse_imdb_csv(csv_text, logger=add_log)
+    except Exception as e:
+        add_log(f"Error parsing IMDB CSV export: {str(e)}", 'error')
+        return []
 
 def get_imdb_watchlist(list_url):
     """Main function to get IMDB watchlist items"""

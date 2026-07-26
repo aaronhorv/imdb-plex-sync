@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import re
+import time
 from typing import Any, Callable
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -10,8 +13,21 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sy
 
 IMDB_ID_RE = re.compile(r"tt\d+")
 TITLE_PATH_RE = re.compile(r"/title/(tt\d+)")
-MAX_SCROLL_ATTEMPTS = 160
-MAX_STAGNANT_SCROLLS = 8
+MAX_SCROLL_ATTEMPTS = 80
+MAX_STAGNANT_SCROLLS = 6
+MAX_PAGINATION_PAGES = 250
+DOWNLOAD_TIMEOUT_MS = 120_000
+
+ID_COLUMNS = ("Const", "IMDb ID", "Title ID", "URL")
+TITLE_COLUMNS = ("Title", "Original Title", "Title Name")
+
+
+class ImdbExportUnavailable(RuntimeError):
+    """Raised when IMDb CSV export is not available from the rendered page."""
+
+
+class ImdbCsvParseError(RuntimeError):
+    """Raised when a downloaded IMDb CSV cannot be parsed into valid IDs."""
 
 
 def scrape_imdb_watchlist(
@@ -20,6 +36,11 @@ def scrape_imdb_watchlist(
     logger=None,
 ) -> list[dict]:
     """Scrape an IMDb watchlist or custom list URL.
+
+    Preferred order:
+      1. Official IMDb CSV export via Playwright download handling.
+      2. Paginated rendered DOM extraction.
+      3. Scrolling rendered DOM plus structured response extraction.
 
     Args:
         list_url: IMDb watchlist or list URL to scrape.
@@ -35,12 +56,16 @@ def scrape_imdb_watchlist(
     if not list_url:
         return []
 
-    dom_items: list[dict[str, str]] = []
     structured_items: list[dict[str, str]] = []
 
     def handle_response(response) -> None:
+        status = response.status
         url = response.url.lower()
         content_type = response.headers.get("content-type", "").lower()
+
+        if status == 202 and "imdb" in url:
+            _log(logger, f"IMDb returned HTTP 202 while preparing content: {response.url}", "info")
+
         if "graphql" not in url and "json" not in content_type:
             return
 
@@ -71,6 +96,7 @@ def scrape_imdb_watchlist(
                 ],
             )
             context = browser.new_context(
+                accept_downloads=True,
                 locale="en-US",
                 user_agent=(
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -98,43 +124,36 @@ def scrape_imdb_watchlist(
             page.set_default_timeout(15_000)
             page.on("response", handle_response)
 
-            page.goto(list_url, wait_until="domcontentloaded", timeout=45_000)
-            _log(logger, "IMDb page opened", "info")
-            _wait_for_initial_titles(page, logger)
+            page.goto(list_url, wait_until="domcontentloaded", timeout=60_000)
+            _wait_for_page_settle(page, logger)
+            _log_page_diagnostics(page, logger)
+            _detect_interstitials(page, logger)
 
-            seen_count = 0
-            stagnant_scrolls = 0
-
-            for attempt in range(1, MAX_SCROLL_ATTEMPTS + 1):
-                current_dom_items = _collect_dom_items(page)
-                if current_dom_items:
-                    dom_items.extend(current_dom_items)
-
-                merged_count = len(_merge_items(dom_items, structured_items))
-                if merged_count > seen_count:
-                    seen_count = merged_count
-                    stagnant_scrolls = 0
-                    _log(logger, f"IMDb collected {seen_count} unique titles", "info")
-                else:
-                    stagnant_scrolls += 1
+            try:
+                export_items, export_mode = _scrape_via_csv_export(page, logger)
+                if export_items:
                     _log(
                         logger,
-                        f"IMDb scroll {attempt}: no new titles detected "
-                        f"({stagnant_scrolls}/{MAX_STAGNANT_SCROLLS})",
-                        "info",
+                        f"IMDb CSV export successful via {export_mode}: {len(export_items)} valid items",
+                        "success",
                     )
+                    return export_items
+                _log(logger, "IMDb CSV export returned no valid items; using paginated extraction", "warning")
+            except Exception as exc:
+                _log(logger, f"IMDb CSV export unavailable or failed: {exc}", "warning")
 
-                if stagnant_scrolls >= MAX_STAGNANT_SCROLLS:
-                    _log(logger, "IMDb scrolling stopped after repeated empty scrolls", "info")
-                    break
+            try:
+                paginated_items = _scrape_paginated_dom(page, logger)
+                if paginated_items:
+                    _log(logger, f"IMDb paginated extraction successful: {len(paginated_items)} items", "success")
+                    return paginated_items
+                _log(logger, "IMDb paginated extraction returned no items; using scrolling fallback", "warning")
+            except Exception as exc:
+                _log(logger, f"IMDb paginated extraction failed: {exc}", "warning")
 
-                previous_height = _get_scroll_height(page)
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                _wait_for_scroll_progress(page, previous_height)
-
-            results = _merge_items(dom_items, structured_items)
-            _log(logger, f"IMDb scrape completed with {len(results)} items", "success")
-            return results
+            scroll_items = _scrape_scrolling_dom(page, structured_items, logger)
+            _log(logger, f"IMDb scrape completed with {len(scroll_items)} items", "success")
+            return scroll_items
 
     except Exception as exc:
         _log(logger, f"IMDb Playwright scraping error: {exc}", "error")
@@ -149,6 +168,328 @@ def scrape_imdb_watchlist(
                 pass
 
 
+def parse_imdb_csv(csv_text: str, logger=None) -> list[dict]:
+    """Parse IMDb CSV export text into the app's internal item format."""
+    if not csv_text.strip():
+        raise ImdbCsvParseError("CSV was empty")
+
+    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
+    headers = reader.fieldnames or []
+    _log(logger, f"IMDb CSV headers: {headers}", "info")
+
+    if not headers:
+        raise ImdbCsvParseError("CSV had no headers")
+
+    items: list[dict] = []
+    seen_ids: set[str] = set()
+    parsed_rows = 0
+
+    for row in reader:
+        parsed_rows += 1
+        imdb_id = _extract_csv_imdb_id(row)
+        if not imdb_id or imdb_id in seen_ids:
+            continue
+
+        title = _extract_csv_title(row) or f"IMDB:{imdb_id}"
+        seen_ids.add(imdb_id)
+        items.append(_build_item(imdb_id, title))
+
+    _log(logger, f"IMDb CSV parsed rows: {parsed_rows}", "info")
+    _log(logger, f"IMDb CSV valid IMDb IDs: {len(items)}", "info")
+
+    if not items:
+        raise ImdbCsvParseError(f"CSV contained no valid IMDb IDs; headers were {headers}")
+
+    return items
+
+
+def _scrape_via_csv_export(page: Page, logger) -> tuple[list[dict], str]:
+    export_control = _find_export_control(page, logger)
+    if export_control is None:
+        _log(logger, "IMDb Export control found: no", "info")
+        raise ImdbExportUnavailable("Export control was not found")
+
+    _log(logger, "IMDb Export control found: yes", "info")
+
+    try:
+        with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
+            export_control.click(timeout=10_000)
+        download = download_info.value
+        _log(logger, "IMDb CSV download started: yes", "info")
+        filename = download.suggested_filename or "imdb-export.csv"
+        _log(logger, f"IMDb CSV filename: {filename}", "info")
+        csv_text = _read_download_text(download)
+        return parse_imdb_csv(csv_text, logger), "direct download"
+    except PlaywrightTimeoutError:
+        _log(logger, "IMDb CSV download started: no", "warning")
+
+    generated_download = _wait_for_generated_download_link(page, logger)
+    if generated_download is None:
+        raise ImdbExportUnavailable("Export did not produce a direct download or generated download link")
+
+    with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
+        generated_download.click(timeout=10_000)
+    download = download_info.value
+    filename = download.suggested_filename or "imdb-export.csv"
+    _log(logger, "IMDb CSV download started from generated link: yes", "info")
+    _log(logger, f"IMDb CSV filename: {filename}", "info")
+    csv_text = _read_download_text(download)
+    return parse_imdb_csv(csv_text, logger), "generated download link"
+
+
+def _find_export_control(page: Page, logger):
+    selectors = [
+        'a[download]',
+        'a[href*="export" i]',
+        'button[aria-label*="Export" i]',
+        'a[aria-label*="Export" i]',
+        '[role="button"][aria-label*="Export" i]',
+        '[role="menuitem"][aria-label*="Export" i]',
+        'button:has-text("Export")',
+        'a:has-text("Export")',
+        '[role="button"]:has-text("Export")',
+        '[role="menuitem"]:has-text("Export")',
+    ]
+
+    for selector in selectors:
+        locator = page.locator(selector)
+        try:
+            count = locator.count()
+        except Exception:
+            continue
+        if count:
+            _log(logger, f"IMDb Export selector matched: {selector}", "info")
+            return locator.nth(0)
+
+    menu_selectors = [
+        'button[aria-label*="More" i]',
+        'button[aria-label*="Menu" i]',
+        '[role="button"][aria-label*="More" i]',
+        '[role="button"]:has-text("More")',
+        'button:has-text("More")',
+    ]
+
+    for selector in menu_selectors:
+        menu = page.locator(selector)
+        try:
+            count = menu.count()
+        except Exception:
+            continue
+        if not count:
+            continue
+        try:
+            menu.nth(0).click(timeout=5_000)
+            page.wait_for_timeout(500)
+        except Exception:
+            continue
+        for export_selector in selectors[2:]:
+            export = page.locator(export_selector)
+            try:
+                if export.count():
+                    _log(logger, f"IMDb Export control found after opening menu: {selector}", "info")
+                    return export.nth(0)
+            except Exception:
+                continue
+
+    return None
+
+
+def _wait_for_generated_download_link(page: Page, logger):
+    _log(logger, "Waiting for generated IMDb export download link", "info")
+    deadline = time.monotonic() + 90
+    selectors = [
+        'a[download]',
+        'a[href*="export" i]',
+        'a[href*="csv" i]',
+        'a:has-text("Download")',
+        'button:has-text("Download")',
+    ]
+
+    while time.monotonic() < deadline:
+        _detect_interstitials(page, logger)
+        for selector in selectors:
+            locator = page.locator(selector)
+            try:
+                if locator.count():
+                    _log(logger, f"IMDb generated download link found with selector: {selector}", "info")
+                    return locator.nth(0)
+            except Exception:
+                continue
+        page.wait_for_timeout(2_000)
+
+    _log(logger, "IMDb generated download link was not found before timeout", "warning")
+    return None
+
+
+def _read_download_text(download) -> str:
+    path = download.path()
+    with open(path, "r", encoding="utf-8-sig", newline="") as file:
+        return file.read()
+
+
+def _scrape_paginated_dom(page: Page, logger) -> list[dict]:
+    all_items: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+
+    for page_number in range(1, MAX_PAGINATION_PAGES + 1):
+        _wait_for_initial_titles(page, logger)
+        page_items = _collect_dom_items(page)
+        new_count = 0
+        for item in page_items:
+            imdb_id = item.get("imdb_id", "")
+            if not IMDB_ID_RE.fullmatch(imdb_id) or imdb_id in seen_ids:
+                continue
+            seen_ids.add(imdb_id)
+            all_items.append(item)
+            new_count += 1
+
+        _log(logger, f"IMDb pagination page {page_number}: collected {new_count} new titles", "info")
+
+        next_button = _find_next_control(page)
+        _log(logger, f"IMDb pagination page {page_number}: Next button found: {bool(next_button)}", "info")
+        if next_button is None:
+            break
+
+        previous_url = page.url
+        previous_first = _first_title_id(page)
+        try:
+            next_button.click(timeout=10_000)
+        except Exception as exc:
+            _log(logger, f"IMDb pagination Next click failed: {exc}", "warning")
+            break
+
+        _wait_for_pagination_change(page, previous_url, previous_first, logger)
+
+    return _merge_items(all_items, [])
+
+
+def _find_next_control(page: Page):
+    selectors = [
+        'a[rel="next"]',
+        'a[aria-label*="Next" i]',
+        'button[aria-label*="Next" i]',
+        '[role="button"][aria-label*="Next" i]',
+        'a:has-text("Next page")',
+        'button:has-text("Next page")',
+        'a:has-text("Next")',
+        'button:has-text("Next")',
+    ]
+
+    for selector in selectors:
+        locator = page.locator(selector)
+        try:
+            count = locator.count()
+        except Exception:
+            continue
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if not candidate.is_visible(timeout=1_000):
+                    continue
+                aria_disabled = candidate.get_attribute("aria-disabled", timeout=1_000)
+                disabled = candidate.get_attribute("disabled", timeout=1_000)
+                class_name = candidate.get_attribute("class", timeout=1_000) or ""
+                if aria_disabled == "true" or disabled is not None or "disabled" in class_name.lower():
+                    continue
+                return candidate
+            except Exception:
+                continue
+
+    return None
+
+
+def _wait_for_pagination_change(page: Page, previous_url: str, previous_first: str, logger) -> None:
+    try:
+        page.wait_for_function(
+            "([oldUrl, oldFirst]) => {"
+            "const first = document.querySelector('a[href*=\"/title/tt\"]');"
+            "const href = first ? first.getAttribute('href') : '';"
+            "return window.location.href !== oldUrl || href !== oldFirst;"
+            "}",
+            arg=[previous_url, previous_first],
+            timeout=15_000,
+        )
+    except PlaywrightTimeoutError:
+        _log(logger, "IMDb pagination did not show a URL or first-title change before timeout", "warning")
+
+    _wait_for_page_settle(page, logger)
+
+
+def _first_title_id(page: Page) -> str:
+    try:
+        return page.locator('a[href*="/title/tt"]').nth(0).get_attribute("href", timeout=2_000) or ""
+    except Exception:
+        return ""
+
+
+def _scrape_scrolling_dom(page: Page, structured_items: list[dict[str, str]], logger) -> list[dict]:
+    dom_items: list[dict[str, str]] = []
+    seen_count = 0
+    stagnant_scrolls = 0
+
+    for attempt in range(1, MAX_SCROLL_ATTEMPTS + 1):
+        current_dom_items = _collect_dom_items(page)
+        if current_dom_items:
+            dom_items.extend(current_dom_items)
+
+        merged_count = len(_merge_items(dom_items, structured_items))
+        if merged_count > seen_count:
+            seen_count = merged_count
+            stagnant_scrolls = 0
+            _log(logger, f"IMDb scrolling fallback collected {seen_count} unique titles", "info")
+        else:
+            stagnant_scrolls += 1
+            _log(
+                logger,
+                f"IMDb scroll {attempt}: no new titles detected "
+                f"({stagnant_scrolls}/{MAX_STAGNANT_SCROLLS})",
+                "info",
+            )
+
+        if stagnant_scrolls >= MAX_STAGNANT_SCROLLS:
+            _log(logger, "IMDb scrolling stopped after repeated empty scrolls", "info")
+            break
+
+        previous_height = _get_scroll_height(page)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        _wait_for_scroll_progress(page, previous_height)
+
+    return _merge_items(dom_items, structured_items)
+
+
+def _extract_csv_imdb_id(row: dict[str, str]) -> str:
+    for column in ID_COLUMNS:
+        value = _row_value(row, column)
+        if value:
+            match = IMDB_ID_RE.search(value)
+            if match:
+                return match.group(0)
+
+    for value in row.values():
+        if value:
+            match = IMDB_ID_RE.search(str(value))
+            if match:
+                return match.group(0)
+
+    return ""
+
+
+def _extract_csv_title(row: dict[str, str]) -> str:
+    for column in TITLE_COLUMNS:
+        value = _row_value(row, column)
+        if value:
+            return _clean_title(value)
+    return ""
+
+
+def _row_value(row: dict[str, str], wanted_column: str) -> str:
+    wanted = wanted_column.strip().lower()
+    for key, value in row.items():
+        if key and key.strip().lower() == wanted and value:
+            return str(value).strip()
+    return ""
+
+
 def _log(logger: Callable[..., Any] | None, message: str, level: str = "info") -> None:
     if logger is None:
         return
@@ -160,16 +501,56 @@ def _log(logger: Callable[..., Any] | None, message: str, level: str = "info") -
         pass
 
 
+def _log_page_diagnostics(page: Page, logger) -> None:
+    try:
+        _log(logger, f"IMDb final URL: {page.url}", "info")
+    except Exception:
+        pass
+    try:
+        _log(logger, f"IMDb page title: {page.title()}", "info")
+    except Exception:
+        pass
+
+
+def _detect_interstitials(page: Page, logger) -> None:
+    url = page.url.lower()
+    try:
+        title = page.title().lower()
+    except Exception:
+        title = ""
+
+    signals = {
+        "login": ("/registration/signin", "signin", "sign in", "log in"),
+        "consent": ("consent", "privacy", "cookies"),
+        "challenge": ("captcha", "robot", "challenge", "verify", "human verification"),
+        "error": ("404", "error", "not found", "unavailable"),
+    }
+
+    page_text = ""
+    try:
+        page_text = page.locator("body").inner_text(timeout=2_000).lower()[:2000]
+    except Exception:
+        pass
+
+    for label, patterns in signals.items():
+        if any(pattern in url or pattern in title or pattern in page_text for pattern in patterns):
+            _log(logger, f"IMDb {label} page signal detected", "warning")
+
+
+def _wait_for_page_settle(page: Page, logger) -> None:
+    try:
+        page.wait_for_load_state("networkidle", timeout=8_000)
+    except PlaywrightTimeoutError:
+        _log(logger, "IMDb network did not become idle; continuing", "info")
+
+
 def _wait_for_initial_titles(page: Page, logger) -> None:
     try:
         page.wait_for_selector('a[href*="/title/tt"]', timeout=15_000)
     except PlaywrightTimeoutError:
         _log(logger, "IMDb title links were not visible after initial load", "warning")
 
-    try:
-        page.wait_for_load_state("networkidle", timeout=8_000)
-    except PlaywrightTimeoutError:
-        _log(logger, "IMDb network did not become idle; continuing with rendered DOM", "info")
+    _wait_for_page_settle(page, logger)
 
 
 def _wait_for_scroll_progress(page: Page, previous_height: int) -> None:
@@ -182,11 +563,7 @@ def _wait_for_scroll_progress(page: Page, previous_height: int) -> None:
     except PlaywrightTimeoutError:
         pass
 
-    try:
-        page.wait_for_load_state("networkidle", timeout=3_000)
-    except PlaywrightTimeoutError:
-        pass
-
+    _wait_for_page_settle(page, None)
     page.wait_for_timeout(400)
 
 
@@ -322,6 +699,14 @@ def _clean_title(title: str) -> str:
     return title
 
 
+def _build_item(imdb_id: str, title: str) -> dict:
+    return {
+        "title": _clean_title(title) or f"IMDB:{imdb_id}",
+        "imdb_id": imdb_id,
+        "link": f"https://www.imdb.com/title/{imdb_id}/",
+    }
+
+
 def _merge_items(dom_items: list[dict[str, str]], structured_items: list[dict[str, str]]) -> list[dict]:
     merged: dict[str, dict[str, str]] = {}
 
@@ -332,11 +717,7 @@ def _merge_items(dom_items: list[dict[str, str]], structured_items: list[dict[st
 
         title = _clean_title(item.get("title", ""))
         if imdb_id not in merged:
-            merged[imdb_id] = {
-                "title": title or f"IMDB:{imdb_id}",
-                "imdb_id": imdb_id,
-                "link": f"https://www.imdb.com/title/{imdb_id}/",
-            }
+            merged[imdb_id] = _build_item(imdb_id, title)
         elif title and merged[imdb_id]["title"] == f"IMDB:{imdb_id}":
             merged[imdb_id]["title"] = title
 
@@ -347,11 +728,7 @@ def _merge_items(dom_items: list[dict[str, str]], structured_items: list[dict[st
 
         title = _clean_title(item.get("title", ""))
         if imdb_id not in merged:
-            merged[imdb_id] = {
-                "title": title or f"IMDB:{imdb_id}",
-                "imdb_id": imdb_id,
-                "link": f"https://www.imdb.com/title/{imdb_id}/",
-            }
+            merged[imdb_id] = _build_item(imdb_id, title)
         elif title and merged[imdb_id]["title"] == f"IMDB:{imdb_id}":
             merged[imdb_id]["title"] = title
 
