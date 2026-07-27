@@ -8,6 +8,7 @@ import re
 import time
 from http.cookies import SimpleCookie
 from typing import Any, Callable
+from urllib.parse import urljoin
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -388,10 +389,7 @@ def _scrape_paginated_dom(page: Page, logger) -> list[dict]:
 
         previous_url = page.url
         previous_first = _first_title_id(page)
-        try:
-            next_button.click(timeout=10_000)
-        except Exception as exc:
-            _log(logger, f"IMDb pagination Next click failed: {exc}", "warning")
+        if not _go_to_next_page(page, next_button, logger):
             break
 
         _wait_for_pagination_change(page, previous_url, previous_first, logger)
@@ -405,10 +403,15 @@ def _find_next_control(page: Page):
         'a[aria-label*="Next" i]',
         'button[aria-label*="Next" i]',
         '[role="button"][aria-label*="Next" i]',
+        '[role="link"][aria-label*="Next" i]',
         'a:has-text("Next page")',
         'button:has-text("Next page")',
+        '[role="link"]:has-text("Next page")',
+        '[role="button"]:has-text("Next page")',
         'a:has-text("Next")',
         'button:has-text("Next")',
+        '[role="link"]:has-text("Next")',
+        '[role="button"]:has-text("Next")',
     ]
 
     for selector in selectors:
@@ -419,19 +422,89 @@ def _find_next_control(page: Page):
             continue
         for index in range(count):
             candidate = locator.nth(index)
-            try:
-                if not candidate.is_visible(timeout=1_000):
-                    continue
-                aria_disabled = candidate.get_attribute("aria-disabled", timeout=1_000)
-                disabled = candidate.get_attribute("disabled", timeout=1_000)
-                class_name = candidate.get_attribute("class", timeout=1_000) or ""
-                if aria_disabled == "true" or disabled is not None or "disabled" in class_name.lower():
-                    continue
+            if _is_enabled_next_candidate(candidate):
                 return candidate
-            except Exception:
-                continue
+
+    controls = page.locator('a, button, [role="button"], [role="link"]')
+    try:
+        count = controls.count()
+    except Exception:
+        return None
+
+    for index in range(count):
+        candidate = controls.nth(index)
+        try:
+            label = " ".join(
+                part
+                for part in (
+                    candidate.get_attribute("aria-label", timeout=500),
+                    candidate.get_attribute("title", timeout=500),
+                    candidate.inner_text(timeout=500),
+                )
+                if part
+            ).lower()
+        except Exception:
+            continue
+
+        if "next" in label and _is_enabled_next_candidate(candidate):
+            return candidate
 
     return None
+
+
+def _is_enabled_next_candidate(candidate) -> bool:
+    try:
+        if not candidate.is_visible(timeout=1_000):
+            return False
+        aria_disabled = candidate.get_attribute("aria-disabled", timeout=1_000)
+        disabled = candidate.get_attribute("disabled", timeout=1_000)
+        class_name = candidate.get_attribute("class", timeout=1_000) or ""
+        if aria_disabled == "true" or disabled is not None or "disabled" in class_name.lower():
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _go_to_next_page(page: Page, next_button, logger) -> bool:
+    href = _next_control_href(next_button)
+    if href and not href.startswith("#") and not href.lower().startswith("javascript:"):
+        next_url = urljoin(page.url, href)
+        _log(logger, f"IMDb pagination navigating to next URL: {next_url}", "info")
+        try:
+            page.goto(next_url, wait_until="domcontentloaded", timeout=60_000)
+            _wait_for_page_settle(page, logger)
+            return True
+        except Exception as exc:
+            _log(logger, f"IMDb pagination direct navigation failed: {exc}", "warning")
+
+    try:
+        next_button.click(timeout=10_000)
+        return True
+    except Exception as exc:
+        _log(logger, f"IMDb pagination Next click failed: {exc}", "warning")
+        return False
+
+
+def _next_control_href(next_button) -> str:
+    try:
+        href = next_button.get_attribute("href", timeout=1_000)
+        if href:
+            return href
+    except Exception:
+        pass
+
+    try:
+        return next_button.evaluate(
+            """
+            (element) => {
+              const anchor = element.closest && element.closest("a[href]");
+              return anchor ? anchor.getAttribute("href") : "";
+            }
+            """
+        ) or ""
+    except Exception:
+        return ""
 
 
 def _wait_for_pagination_change(page: Page, previous_url: str, previous_first: str, logger) -> None:
