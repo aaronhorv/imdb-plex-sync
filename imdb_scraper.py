@@ -628,13 +628,6 @@ def _detect_interstitials(page: Page, logger) -> list[str]:
     except Exception:
         title = ""
 
-    signals = {
-        "login": ("/registration/signin", "signin", "sign in", "log in"),
-        "consent": ("consent", "privacy", "cookies"),
-        "challenge": ("captcha", "robot", "challenge", "verify", "human verification"),
-        "error": ("404", "error", "not found", "unavailable"),
-    }
-
     page_text = ""
     try:
         page_text = page.locator("body").inner_text(timeout=2_000).lower()[:2000]
@@ -642,8 +635,35 @@ def _detect_interstitials(page: Page, logger) -> list[str]:
         pass
 
     detected = []
-    for label, patterns in signals.items():
-        if any(pattern in url or pattern in title or pattern in page_text for pattern in patterns):
+    checks = {
+        "login": (
+            ("/registration/signin", "/ap/signin", "/signin"),
+            ("sign in", "imdb sign in", "login"),
+            (),
+        ),
+        "consent": (
+            ("consent",),
+            ("consent", "privacy preferences"),
+            ("accept cookies", "privacy preferences", "cookie preferences"),
+        ),
+        "challenge": (
+            ("captcha", "challenge"),
+            ("captcha", "robot", "challenge", "human verification"),
+            ("captcha", "robot", "challenge", "human verification"),
+        ),
+        "error": (
+            (),
+            ("404", "not found", "unavailable"),
+            ("page not found", "this page could not be found"),
+        ),
+    }
+
+    for label, (url_patterns, title_patterns, body_patterns) in checks.items():
+        if (
+            any(pattern in url for pattern in url_patterns)
+            or any(pattern in title for pattern in title_patterns)
+            or any(pattern in page_text for pattern in body_patterns)
+        ):
             _log(logger, f"IMDb {label} page signal detected", "warning")
             detected.append(label)
 
