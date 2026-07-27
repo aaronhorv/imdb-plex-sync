@@ -9,7 +9,12 @@ import schedule
 import threading
 import re
 
-from imdb_scraper import parse_imdb_cookie_string, parse_imdb_csv, scrape_imdb_watchlist
+from imdb_scraper import (
+    ImdbAccessBlockedError,
+    parse_imdb_cookie_string,
+    parse_imdb_csv,
+    scrape_imdb_watchlist,
+)
 
 app = Flask(__name__)
 
@@ -366,6 +371,9 @@ def get_imdb_watchlist(list_url):
                 add_log(f"Playwright IMDB scrape successful: {len(items)} items found", 'success')
                 return items
             add_log("Playwright IMDB scrape returned no items; using fallback scraper", 'warning')
+        except ImdbAccessBlockedError as e:
+            add_log(str(e), 'error')
+            return []
         except Exception as e:
             add_log(f"Playwright IMDB scrape failed; using fallback scraper: {str(e)}", 'warning')
 

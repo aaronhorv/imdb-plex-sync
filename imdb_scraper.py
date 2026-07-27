@@ -31,6 +31,10 @@ class ImdbCsvParseError(RuntimeError):
     """Raised when a downloaded IMDb CSV cannot be parsed into valid IDs."""
 
 
+class ImdbAccessBlockedError(RuntimeError):
+    """Raised when IMDb shows an interstitial instead of the requested list."""
+
+
 def scrape_imdb_watchlist(
     list_url: str,
     imdb_cookie: str = "",
@@ -117,7 +121,7 @@ def scrape_imdb_watchlist(
             page.goto(list_url, wait_until="domcontentloaded", timeout=60_000)
             _wait_for_page_settle(page, logger)
             _log_page_diagnostics(page, logger)
-            _detect_interstitials(page, logger)
+            _raise_for_blocking_interstitial(page, logger)
 
             try:
                 export_items, export_mode = _scrape_via_csv_export(page, logger)
@@ -338,7 +342,7 @@ def _wait_for_generated_download_link(page: Page, logger):
     ]
 
     while time.monotonic() < deadline:
-        _detect_interstitials(page, logger)
+        _raise_for_blocking_interstitial(page, logger)
         for selector in selectors:
             locator = page.locator(selector)
             try:
@@ -544,7 +548,7 @@ def _log_page_diagnostics(page: Page, logger) -> None:
         pass
 
 
-def _detect_interstitials(page: Page, logger) -> None:
+def _detect_interstitials(page: Page, logger) -> list[str]:
     url = page.url.lower()
     try:
         title = page.title().lower()
@@ -564,9 +568,32 @@ def _detect_interstitials(page: Page, logger) -> None:
     except Exception:
         pass
 
+    detected = []
     for label, patterns in signals.items():
         if any(pattern in url or pattern in title or pattern in page_text for pattern in patterns):
             _log(logger, f"IMDb {label} page signal detected", "warning")
+            detected.append(label)
+
+    return detected
+
+
+def _raise_for_blocking_interstitial(page: Page, logger) -> None:
+    detected = _detect_interstitials(page, logger)
+    blocking_labels = [label for label in detected if label in {"login", "consent", "challenge", "error"}]
+    if not blocking_labels:
+        return
+
+    label_text = ", ".join(blocking_labels)
+    if "challenge" in blocking_labels:
+        guidance = "IMDb is showing Human Verification. Open IMDb in a normal browser, solve it, then update the IMDb Cookie setting."
+    elif "login" in blocking_labels:
+        guidance = "IMDb is asking for sign-in. Update the IMDb Cookie setting with fresh logged-in cookies."
+    elif "consent" in blocking_labels:
+        guidance = "IMDb is showing a consent page. Accept it in a browser, then update the IMDb Cookie setting with fresh cookies."
+    else:
+        guidance = "IMDb is showing an error page instead of the configured list. Check that the list URL is correct and accessible."
+
+    raise ImdbAccessBlockedError(f"IMDb access blocked by {label_text} page. {guidance}")
 
 
 def _wait_for_page_settle(page: Page, logger) -> None:
