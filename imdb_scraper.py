@@ -138,7 +138,7 @@ def scrape_imdb_watchlist(
                 _log(logger, f"IMDb CSV export unavailable or failed: {exc}", "warning")
 
             try:
-                paginated_items = _scrape_paginated_dom(page, logger)
+                paginated_items = _scrape_paginated_dom(page, structured_items, logger)
                 if paginated_items:
                     _log(logger, f"IMDb paginated extraction successful: {len(paginated_items)} items", "success")
                     return paginated_items
@@ -364,7 +364,7 @@ def _read_download_text(download) -> str:
         return file.read()
 
 
-def _scrape_paginated_dom(page: Page, logger) -> list[dict]:
+def _scrape_paginated_dom(page: Page, structured_items: list[dict[str, str]], logger) -> list[dict]:
     all_items: list[dict[str, str]] = []
     seen_ids: set[str] = set()
 
@@ -382,6 +382,7 @@ def _scrape_paginated_dom(page: Page, logger) -> list[dict]:
 
         _log(logger, f"IMDb pagination page {page_number}: collected {new_count} new titles", "info")
 
+        _scroll_to_pagination_controls(page, logger)
         next_button = _find_next_control(page)
         _log(logger, f"IMDb pagination page {page_number}: Next button found: {bool(next_button)}", "info")
         if next_button is None:
@@ -394,7 +395,23 @@ def _scrape_paginated_dom(page: Page, logger) -> list[dict]:
 
         _wait_for_pagination_change(page, previous_url, previous_first, logger)
 
-    return _merge_items(all_items, [])
+    merged_items = _merge_items(all_items, structured_items)
+    if structured_items:
+        _log(
+            logger,
+            f"IMDb pagination merged {len(merged_items)} unique titles from DOM and structured responses",
+            "info",
+        )
+    return merged_items
+
+
+def _scroll_to_pagination_controls(page: Page, logger) -> None:
+    try:
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(750)
+        _wait_for_page_settle(page, logger)
+    except Exception as exc:
+        _log(logger, f"IMDb pagination footer scroll failed: {exc}", "info")
 
 
 def _find_next_control(page: Page):
