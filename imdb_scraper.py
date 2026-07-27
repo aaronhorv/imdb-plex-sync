@@ -62,6 +62,11 @@ def scrape_imdb_watchlist(
     if not list_url:
         return []
 
+    normalized_list_url = _normalize_imdb_list_url(list_url)
+    if normalized_list_url != list_url:
+        _log(logger, f"IMDb normalized list URL: {normalized_list_url}", "info")
+    list_url = normalized_list_url
+
     structured_items: list[dict[str, str]] = []
 
     def handle_response(response) -> None:
@@ -531,6 +536,14 @@ def _with_page_number(url: str, page_number: int) -> str:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query["page"] = str(page_number)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _normalize_imdb_list_url(url: str) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["sort"] = "date_added,desc"
+    query.pop("page", None)
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 

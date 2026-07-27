@@ -22,6 +22,7 @@ CONFIG_FILE = '/config/config.json'
 LOGS_FILE = '/config/logs.json'
 RESULTS_FILE = '/config/sync_results.json'
 STATS_FILE = '/config/sync_stats.json'
+IMDB_CACHE_FILE = '/config/imdb_items_cache.json'
 VERSION_FILE = '/app/VERSION'
 LOCAL_VERSION_FILE = os.path.join(os.path.dirname(__file__), 'VERSION')
 PLEX_REQUEST_TIMEOUT = (5, 30)
@@ -76,6 +77,43 @@ def save_sync_results(results):
     os.makedirs('/config', exist_ok=True)
     with open(RESULTS_FILE, 'w') as f:
         json.dump(results, f, indent=2)
+
+def load_imdb_items_cache(list_url):
+    if not os.path.exists(IMDB_CACHE_FILE):
+        return []
+
+    try:
+        with open(IMDB_CACHE_FILE, 'r') as f:
+            cache = json.load(f)
+        if cache.get('list_url') != list_url:
+            add_log("Cached IMDB watchlist ignored because the configured URL changed", 'warning')
+            return []
+        items = cache.get('items', [])
+        if not isinstance(items, list):
+            return []
+        saved_at = cache.get('saved_at', 'unknown time')
+        add_log(f"Using cached IMDB watchlist from {saved_at}: {len(items)} items", 'warning')
+        return items
+    except Exception as e:
+        add_log(f"Could not read cached IMDB watchlist: {str(e)}", 'warning')
+        return []
+
+def save_imdb_items_cache(list_url, items):
+    if not items:
+        return
+
+    try:
+        os.makedirs('/config', exist_ok=True)
+        with open(IMDB_CACHE_FILE, 'w') as f:
+            json.dump({
+                'list_url': list_url,
+                'saved_at': datetime.now().isoformat(),
+                'count': len(items),
+                'items': items,
+            }, f, indent=2)
+        add_log(f"Cached IMDB watchlist: {len(items)} items", 'info')
+    except Exception as e:
+        add_log(f"Could not cache IMDB watchlist: {str(e)}", 'warning')
 
 def save_sync_stats(stats):
     """Save sync statistics including removed count"""
@@ -369,10 +407,15 @@ def get_imdb_watchlist(list_url):
             )
             if items:
                 add_log(f"Playwright IMDB scrape successful: {len(items)} items found", 'success')
+                save_imdb_items_cache(list_url, items)
                 return items
             add_log("Playwright IMDB scrape returned no items; using fallback scraper", 'warning')
         except ImdbAccessBlockedError as e:
             add_log(str(e), 'error')
+            cached_items = load_imdb_items_cache(list_url)
+            if cached_items:
+                add_log("Continuing with cached IMDB watchlist because IMDb is currently blocked", 'warning')
+                return cached_items
             return []
         except Exception as e:
             add_log(f"Playwright IMDB scrape failed; using fallback scraper: {str(e)}", 'warning')
@@ -385,12 +428,16 @@ def get_imdb_watchlist(list_url):
             # Direct list URL provided
             list_id = list_match.group(1)
             add_log(f"Detected direct list URL with ID: {list_id}", 'info')
-            return get_imdb_list_data(list_id)
+            items = get_imdb_list_data(list_id)
+            save_imdb_items_cache(list_url, items)
+            return items
         elif user_match:
             # User watchlist URL
             user_id = user_match.group(1)
             add_log(f"Detected personal watchlist for user: {user_id}", 'info')
-            return get_imdb_export_data(user_id)
+            items = get_imdb_export_data(user_id)
+            save_imdb_items_cache(list_url, items)
+            return items
         else:
             add_log(f"Could not parse URL: {list_url}", 'error')
             return []
