@@ -16,6 +16,7 @@ RUN playwright install --with-deps chromium
 # Copy application files and templates
 COPY app.py .
 COPY imdb_scraper.py .
+COPY VERSION .
 COPY templates/ templates/
 
 # Create config directory

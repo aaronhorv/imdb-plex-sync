@@ -17,9 +17,22 @@ CONFIG_FILE = '/config/config.json'
 LOGS_FILE = '/config/logs.json'
 RESULTS_FILE = '/config/sync_results.json'
 STATS_FILE = '/config/sync_stats.json'
+VERSION_FILE = '/app/VERSION'
+LOCAL_VERSION_FILE = os.path.join(os.path.dirname(__file__), 'VERSION')
 PLEX_REQUEST_TIMEOUT = (5, 30)
 PLEX_REQUEST_RETRIES = 3
 PLEX_CLIENT_IDENTIFIER = 'watchlist-plex-sync'
+
+def get_app_version():
+    """Return the deployed app version."""
+    env_version = os.environ.get('APP_VERSION', '').strip()
+    if env_version:
+        return env_version
+    for version_file in (VERSION_FILE, LOCAL_VERSION_FILE):
+        if os.path.exists(version_file):
+            with open(version_file, 'r') as f:
+                return f.read().strip()
+    return 'dev'
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -1597,6 +1610,13 @@ def get_logs():
 def get_results():
     return jsonify(load_sync_results())
 
+@app.route('/api/version', methods=['GET'])
+def get_version():
+    return jsonify({
+        'version': get_app_version(),
+        'timestamp': datetime.now().isoformat()
+    })
+
 @app.route('/api/sync', methods=['POST'])
 def trigger_sync():
     threading.Thread(target=sync_watchlist, daemon=True).start()
@@ -1644,6 +1664,6 @@ def health_check():
     }), 200
 
 if __name__ == '__main__':
-    add_log("Application starting", 'info')
+    add_log(f"Application starting (version {get_app_version()})", 'info')
     threading.Thread(target=schedule_sync, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=False)

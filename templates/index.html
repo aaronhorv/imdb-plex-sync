@@ -39,6 +39,13 @@
             font-size: 1.1rem;
             opacity: 0.9;
         }
+
+        .footer {
+            color: rgba(255, 255, 255, 0.82);
+            font-size: 13px;
+            margin-top: 24px;
+            text-align: center;
+        }
         
         .tabs {
             display: flex;
@@ -764,6 +771,7 @@
                 </div>
             </div>
         </div>
+        <div class="footer">Version <span id="appVersion">loading...</span></div>
     </div>
     
     <script>
@@ -785,6 +793,7 @@
             loadStatus();
             loadLogs();
             loadResults();
+            loadVersion();
             
             // Refresh logs every 3 seconds
             setInterval(loadLogs, 3000);
@@ -853,6 +862,16 @@
                 });
             } catch (error) {
                 console.error('Error loading config:', error);
+            }
+        }
+
+        async function loadVersion() {
+            try {
+                const response = await fetch('/api/version');
+                const data = await response.json();
+                document.getElementById('appVersion').textContent = data.version || 'unknown';
+            } catch (error) {
+                document.getElementById('appVersion').textContent = 'unknown';
             }
         }
         
