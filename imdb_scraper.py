@@ -8,7 +8,7 @@ import re
 import time
 from http.cookies import SimpleCookie
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -386,6 +386,9 @@ def _scrape_paginated_dom(page: Page, structured_items: list[dict[str, str]], lo
         next_button = _find_next_control(page)
         _log(logger, f"IMDb pagination page {page_number}: Next button found: {bool(next_button)}", "info")
         if next_button is None:
+            previous_first = _first_title_id(page)
+            if new_count and _go_to_numbered_page(page, page_number + 1, previous_first, logger):
+                continue
             break
 
         previous_url = page.url
@@ -501,6 +504,34 @@ def _go_to_next_page(page: Page, next_button, logger) -> bool:
     except Exception as exc:
         _log(logger, f"IMDb pagination Next click failed: {exc}", "warning")
         return False
+
+
+def _go_to_numbered_page(page: Page, page_number: int, previous_first: str, logger) -> bool:
+    next_url = _with_page_number(page.url, page_number)
+    _log(logger, f"IMDb pagination trying numbered page URL: {next_url}", "info")
+
+    try:
+        page.goto(next_url, wait_until="domcontentloaded", timeout=60_000)
+        _wait_for_page_settle(page, logger)
+    except Exception as exc:
+        _log(logger, f"IMDb pagination numbered page navigation failed: {exc}", "warning")
+        return False
+
+    _raise_for_blocking_interstitial(page, logger)
+    current_first = _first_title_id(page)
+    if current_first and current_first != previous_first:
+        _log(logger, f"IMDb pagination numbered page {page_number} loaded", "info")
+        return True
+
+    _log(logger, f"IMDb pagination numbered page {page_number} did not expose new titles", "info")
+    return False
+
+
+def _with_page_number(url: str, page_number: int) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page_number)
+    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
 def _next_control_href(next_button) -> str:
