@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app import ImdbAccessBlockedError, check_streaming_availability, get_imdb_watchlist, _provider_matches_service
+from app import (
+    ImdbAccessBlockedError,
+    _provider_matches_service,
+    check_streaming_availability,
+    get_imdb_watchlist,
+    order_sync_results_newest_first,
+)
 from imdb_scraper import (
     PERSONAL_WATCHLIST_URL,
     _detect_interstitials,
@@ -46,6 +52,28 @@ tt0000003,Middle title,2026-01-15
         self.assertEqual(
             _normalize_imdb_list_url(url),
             f'{url}?sort=date_added%2Cdesc',
+        )
+
+
+class SyncResultOrderingTests(unittest.TestCase):
+    def test_dated_results_are_newest_first(self):
+        results = [
+            {'title': 'Old', 'date_added': '2025-01-01'},
+            {'title': 'New', 'date_added': '2026-08-31'},
+        ]
+
+        ordered = order_sync_results_newest_first(results)
+
+        self.assertEqual([result['title'] for result in ordered], ['New', 'Old'])
+
+    def test_undated_fallback_results_use_reverse_processing_order(self):
+        results = [{'title': 'Old'}, {'title': 'Middle'}, {'title': 'New'}]
+
+        ordered = order_sync_results_newest_first(results)
+
+        self.assertEqual(
+            [result['title'] for result in ordered],
+            ['New', 'Middle', 'Old'],
         )
 
 

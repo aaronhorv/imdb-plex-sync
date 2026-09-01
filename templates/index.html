@@ -1133,15 +1133,6 @@
                     return;
                 }
 
-                const orderedResults = [...results].sort((left, right) => {
-                    const leftDate = Date.parse(left.date_added || '');
-                    const rightDate = Date.parse(right.date_added || '');
-                    if (Number.isNaN(leftDate) && Number.isNaN(rightDate)) return 0;
-                    if (Number.isNaN(leftDate)) return 1;
-                    if (Number.isNaN(rightDate)) return -1;
-                    return rightDate - leftDate;
-                });
-                
                 const tableHTML = `
                     <table class="results-table">
                         <thead>
@@ -1154,7 +1145,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            ${orderedResults.map(result => `
+                            ${results.map(result => `
                                 <tr>
                                     <td><strong>${result.title || result.original_title}</strong></td>
                                     <td>${result.year || 'N/A'}</td>

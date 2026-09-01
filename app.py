@@ -95,6 +95,31 @@ def save_sync_results(results):
     with open(RESULTS_FILE, 'w') as f:
         json.dump(results, f, indent=2)
 
+
+def order_sync_results_newest_first(results):
+    """Order dated results newest-first and reverse undated scraper results."""
+    decorated = []
+    for index, result in enumerate(results):
+        date_value = result.get('date_added')
+        timestamp = None
+        if date_value:
+            try:
+                timestamp = datetime.fromisoformat(
+                    str(date_value).strip().replace('Z', '+00:00')
+                ).timestamp()
+            except (TypeError, ValueError):
+                pass
+        decorated.append((result, timestamp, index))
+
+    decorated.sort(
+        key=lambda entry: (
+            entry[1] is None,
+            -(entry[1] or 0),
+            -entry[2] if entry[1] is None else entry[2],
+        )
+    )
+    return [result for result, _, _ in decorated]
+
 def load_imdb_items_cache(list_url):
     if not os.path.exists(IMDB_CACHE_FILE):
         return []
@@ -1754,7 +1779,7 @@ def get_logs():
 
 @app.route('/api/results', methods=['GET'])
 def get_results():
-    return jsonify(load_sync_results())
+    return jsonify(order_sync_results_newest_first(load_sync_results()))
 
 @app.route('/api/version', methods=['GET'])
 def get_version():
