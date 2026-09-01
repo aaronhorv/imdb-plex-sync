@@ -6,6 +6,7 @@ import csv
 import io
 import re
 import time
+from datetime import datetime
 from http.cookies import SimpleCookie
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
@@ -22,6 +23,7 @@ DOWNLOAD_TIMEOUT_MS = 120_000
 
 ID_COLUMNS = ("Const", "IMDb ID", "Title ID", "URL")
 TITLE_COLUMNS = ("Title", "Original Title", "Title Name")
+DATE_ADDED_COLUMNS = ("Created", "Date Added", "Added", "Created At")
 
 
 class ImdbExportUnavailable(RuntimeError):
@@ -129,6 +131,14 @@ def scrape_imdb_watchlist(
             _log_page_diagnostics(page, logger)
             _raise_for_blocking_interstitial(page, logger)
 
+            redirected_url = _normalize_imdb_list_url(page.url)
+            if redirected_url != page.url:
+                _log(logger, f"IMDb reapplying newest-first sort after redirect: {redirected_url}", "info")
+                page.goto(redirected_url, wait_until="domcontentloaded", timeout=60_000)
+                _wait_for_page_settle(page, logger)
+                _log_page_diagnostics(page, logger)
+                _raise_for_blocking_interstitial(page, logger)
+
             try:
                 export_items, export_mode = _scrape_via_csv_export(page, logger)
                 if export_items:
@@ -180,7 +190,7 @@ def parse_imdb_csv(csv_text: str, logger=None) -> list[dict]:
     if not headers:
         raise ImdbCsvParseError("CSV had no headers")
 
-    items: list[dict] = []
+    parsed_items: list[tuple[dict, float | None, int]] = []
     seen_ids: set[str] = set()
     parsed_rows = 0
 
@@ -191,8 +201,24 @@ def parse_imdb_csv(csv_text: str, logger=None) -> list[dict]:
             continue
 
         title = _extract_csv_title(row) or f"IMDB:{imdb_id}"
+        date_added = _extract_csv_date_added(row)
         seen_ids.add(imdb_id)
-        items.append(_build_item(imdb_id, title))
+        item = _build_item(imdb_id, title)
+        if date_added:
+            item["date_added"] = date_added
+        parsed_items.append((item, _date_sort_value(date_added), parsed_rows))
+
+    if any(sort_value is not None for _, sort_value, _ in parsed_items):
+        parsed_items.sort(
+            key=lambda record: (
+                record[1] is None,
+                -(record[1] or 0),
+                record[2],
+            )
+        )
+        _log(logger, "IMDb CSV rows sorted by date added (newest first)", "info")
+
+    items = [item for item, _, _ in parsed_items]
 
     _log(logger, f"IMDb CSV parsed rows: {parsed_rows}", "info")
     _log(logger, f"IMDb CSV valid IMDb IDs: {len(items)}", "info")
@@ -541,6 +567,10 @@ def _with_page_number(url: str, page_number: int) -> str:
 
 def _normalize_imdb_list_url(url: str) -> str:
     parsed = urlparse(url)
+    if "imdb." not in parsed.netloc.lower() or not (
+        "/watchlist" in parsed.path.lower() or "/list/" in parsed.path.lower()
+    ):
+        return url
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query["sort"] = "date_added,desc"
     query.pop("page", None)
@@ -650,6 +680,32 @@ def _extract_csv_title(row: dict[str, str]) -> str:
         if value:
             return _clean_title(value)
     return ""
+
+
+def _extract_csv_date_added(row: dict[str, str]) -> str:
+    for column in DATE_ADDED_COLUMNS:
+        value = _row_value(row, column)
+        if value:
+            return value
+    return ""
+
+
+def _date_sort_value(value: str) -> float | None:
+    if not value:
+        return None
+
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized).timestamp()
+    except ValueError:
+        pass
+
+    for date_format in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(normalized, date_format).timestamp()
+        except ValueError:
+            continue
+    return None
 
 
 def _row_value(row: dict[str, str], wanted_column: str) -> str:

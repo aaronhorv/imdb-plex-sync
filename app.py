@@ -29,6 +29,23 @@ PLEX_REQUEST_TIMEOUT = (5, 30)
 PLEX_REQUEST_RETRIES = 3
 PLEX_CLIENT_IDENTIFIER = 'watchlist-plex-sync'
 
+STREAMING_SERVICE_DEFINITIONS = {
+    'netflix': {'ids': {8, 1796}, 'aliases': {'netflix'}},
+    'prime': {'ids': {9, 119}, 'aliases': {'amazon prime video', 'prime video'}},
+    'disney': {'ids': {337}, 'aliases': {'disney plus'}},
+    'max': {'ids': {384, 1899}, 'aliases': {'max', 'hbo max'}},
+    'apple': {'ids': {350}, 'aliases': {'apple tv plus'}},
+    'paramount': {'ids': {531}, 'aliases': {'paramount plus'}},
+    'hulu': {'ids': {15}, 'aliases': {'hulu'}},
+    'peacock': {'ids': {386, 387}, 'aliases': {'peacock'}},
+}
+
+STREAMING_SERVICE_KEYS_BY_ID = {
+    provider_id: service_key
+    for service_key, definition in STREAMING_SERVICE_DEFINITIONS.items()
+    for provider_id in definition['ids']
+}
+
 def get_app_version():
     """Return the deployed app version."""
     env_version = os.environ.get('APP_VERSION', '').strip()
@@ -327,7 +344,7 @@ def get_imdb_export_data(user_id):
         }
 
         # Try both URLs with JSON extraction
-        watchlist_url = f"https://www.imdb.com/user/{user_id}/watchlist"
+        watchlist_url = f"https://www.imdb.com/user/{user_id}/watchlist?sort=date_added%2Cdesc"
 
         imdb_cookie = load_config().get('imdbCookie', '').strip()
         if imdb_cookie:
@@ -412,11 +429,7 @@ def get_imdb_watchlist(list_url):
             add_log("Playwright IMDB scrape returned no items; using fallback scraper", 'warning')
         except ImdbAccessBlockedError as e:
             add_log(str(e), 'error')
-            cached_items = load_imdb_items_cache(list_url)
-            if cached_items:
-                add_log("Continuing with cached IMDB watchlist because IMDb is currently blocked", 'warning')
-                return cached_items
-            return []
+            add_log("Trying the requests fallback before using cached IMDb data", 'warning')
         except Exception as e:
             add_log(f"Playwright IMDB scrape failed; using fallback scraper: {str(e)}", 'warning')
 
@@ -429,18 +442,27 @@ def get_imdb_watchlist(list_url):
             list_id = list_match.group(1)
             add_log(f"Detected direct list URL with ID: {list_id}", 'info')
             items = get_imdb_list_data(list_id)
-            save_imdb_items_cache(list_url, items)
-            return items
         elif user_match:
             # User watchlist URL
             user_id = user_match.group(1)
             add_log(f"Detected personal watchlist for user: {user_id}", 'info')
             items = get_imdb_export_data(user_id)
-            save_imdb_items_cache(list_url, items)
-            return items
         else:
             add_log(f"Could not parse URL: {list_url}", 'error')
             return []
+
+        if items:
+            save_imdb_items_cache(list_url, items)
+            return items
+
+        cached_items = load_imdb_items_cache(list_url)
+        if cached_items:
+            add_log(
+                "Continuing with cached IMDB watchlist; additions made after the cache timestamp will be missing",
+                'warning'
+            )
+            return cached_items
+        return []
         
     except Exception as e:
         add_log(f"Error fetching IMDB watchlist: {str(e)}", 'error')
@@ -475,7 +497,7 @@ def get_imdb_list_data(list_id):
 
         # JSON EXTRACTION - Gets ALL items in one request!
         add_log(f"Attempting JSON extraction from list page...", 'info')
-        list_url = f"https://www.imdb.com/list/{list_id}/"
+        list_url = f"https://www.imdb.com/list/{list_id}/?sort=date_added%2Cdesc"
 
         try:
             response = session.get(list_url, headers=headers, timeout=20)
@@ -710,10 +732,50 @@ def get_tmdb_data(imdb_id, api_key):
         add_log(f"Error getting TMDB data for {imdb_id}: {str(e)}", 'error')
         return None, None, None, None
 
+def _provider_id(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_provider_name(value):
+    value = str(value or '').lower().replace('+', ' plus ')
+    return re.sub(r'[^a-z0-9]+', ' ', value).strip()
+
+
+def _configured_service_key(service):
+    key = str(service.get('key', '')).strip().lower()
+    if key in STREAMING_SERVICE_DEFINITIONS:
+        return key
+    return STREAMING_SERVICE_KEYS_BY_ID.get(_provider_id(service.get('id')))
+
+
+def _provider_matches_service(provider, service):
+    provider_id = _provider_id(provider.get('provider_id'))
+    service_id = _provider_id(service.get('id'))
+    if provider_id is not None and provider_id == service_id:
+        return True
+
+    service_key = _configured_service_key(service)
+    definition = STREAMING_SERVICE_DEFINITIONS.get(service_key)
+    if not definition:
+        return False
+    if provider_id in definition['ids']:
+        return True
+
+    provider_name = _normalize_provider_name(provider.get('provider_name'))
+    return any(
+        provider_name == alias or provider_name.startswith(f'{alias} ')
+        for alias in definition['aliases']
+    )
+
+
 def check_streaming_availability(tmdb_id, media_type, api_key, streaming_services):
-    """Check streaming availability with per-service regions - FIXED VERSION"""
+    """Return True/False for availability, or None when TMDB could not be checked."""
     try:
         available_services = []
+        availability_errors = []
         
         # Log what we're checking
         add_log(f"Checking streaming for TMDB ID {tmdb_id} ({media_type})", 'info')
@@ -729,7 +791,7 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
                 service_obj = {'id': service, 'region': region}
             elif isinstance(service, dict):
                 # New format: {id: X, region: Y}
-                region = service.get('region', 'US')
+                region = str(service.get('region', 'US')).upper()
                 service_obj = service
             else:
                 add_log(f"Warning: Invalid service format: {service}", 'warning')
@@ -740,18 +802,26 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
             regions_to_check[region].append(service_obj)
         
         add_log(f"Regions to check: {list(regions_to_check.keys())}", 'info')
+
+        if not regions_to_check:
+            add_log("No streaming services configured", 'info')
+            return False, []
         
         # Check each region
         for region, services in regions_to_check.items():
             url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/watch/providers"
-            params = {'api_key': api_key}
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
+            try:
+                response = requests.get(url, params={'api_key': api_key}, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+            except Exception as e:
+                availability_errors.append(f"{region}: {str(e)}")
+                add_log(f"TMDB streaming check failed for region {region}: {str(e)}", 'warning')
+                continue
             
             add_log(f"Checking region {region} - Available regions in response: {list(data.get('results', {}).keys())}", 'info')
             
-            if 'results' not in data or region not in data['results']:
+            if region not in data.get('results', {}):
                 add_log(f"No data for region {region}", 'info')
                 continue
             
@@ -766,7 +836,7 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
                         add_log(f"Warning: Provider is not a dict: {provider}", 'warning')
                         continue
                     
-                    provider_id = provider.get('provider_id')
+                    provider_id = _provider_id(provider.get('provider_id'))
                     provider_name = provider.get('provider_name', 'Unknown')
                     
                     add_log(f"Found provider: {provider_name} (ID: {provider_id})", 'info')
@@ -776,21 +846,23 @@ def check_streaming_availability(tmdb_id, media_type, api_key, streaming_service
                     
                     # Check if this provider matches any of our configured services
                     for service in services:
-                        service_id = service.get('id')
+                        service_id = _provider_id(service.get('id'))
                         add_log(f"Comparing provider {provider_id} with configured service {service_id}", 'info')
-                        if provider_id == service_id:
+                        if _provider_matches_service(provider, service):
                             service_name = f"{provider_name} ({region})"
                             if service_name not in available_services:
                                 available_services.append(service_name)
                                 add_log(f"MATCH! Added {service_name}", 'success')
         
         add_log(f"Final available services: {available_services}", 'info')
-        return len(available_services) > 0, available_services
+        if available_services:
+            return True, available_services
+        if availability_errors:
+            return None, []
+        return False, []
     except Exception as e:
         add_log(f"Error checking streaming availability: {str(e)}", 'warning')
-        import traceback
-        add_log(f"Traceback: {traceback.format_exc()}", 'error')
-        return False, []
+        return None, []
 
 def plex_request(method, url, **kwargs):
     """Make a Plex Discover request with retries for transient slow responses."""
@@ -1416,7 +1488,8 @@ def sync_watchlist():
             'year': None,
             'status': 'processing',
             'streaming_services': [],
-            'error': None
+            'error': None,
+            'date_added': item.get('date_added')
         }
 
         # Resolve TMDB ID and media type
@@ -1451,6 +1524,13 @@ def sync_watchlist():
             config['tmdbApiKey'],
             config['streamingServices']
         )
+
+        if is_available is None:
+            result['status'] = 'failed'
+            result['error'] = 'Streaming availability check failed; Plex was not changed'
+            add_log("  Streaming availability could not be verified; leaving Plex unchanged", 'error')
+            results.append(result)
+            continue
 
         # For Plex we need an IMDB ID; fetch it from TMDB if missing
         if not imdb_id:

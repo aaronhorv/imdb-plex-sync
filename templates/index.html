@@ -632,7 +632,7 @@
 
                 <div class="card">
                     <h2>📺 Streaming Services</h2>
-                    <p style="margin-bottom: 20px; color: #666;">Select the streaming services you have access to. Movies available on these services will be skipped during sync.</p>
+                    <p style="margin-bottom: 20px; color: #666;">Select the streaming services you have access to. Movies and series available on these services will be skipped during sync.</p>
 
                     <div id="streamingServices">
                         <div class="service-item">
@@ -907,6 +907,7 @@
                     
                     streamingServices.push({
                         id: providerId,
+                        key: service.name === 'hbo' ? 'max' : service.name,
                         region: region
                     });
                 }
@@ -1098,6 +1099,15 @@
                     `;
                     return;
                 }
+
+                const orderedResults = [...results].sort((left, right) => {
+                    const leftDate = Date.parse(left.date_added || '');
+                    const rightDate = Date.parse(right.date_added || '');
+                    if (Number.isNaN(leftDate) && Number.isNaN(rightDate)) return 0;
+                    if (Number.isNaN(leftDate)) return 1;
+                    if (Number.isNaN(rightDate)) return -1;
+                    return rightDate - leftDate;
+                });
                 
                 const tableHTML = `
                     <table class="results-table">
@@ -1111,7 +1121,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            ${[...results].reverse().map(result => `
+                            ${orderedResults.map(result => `
                                 <tr>
                                     <td><strong>${result.title || result.original_title}</strong></td>
                                     <td>${result.year || 'N/A'}</td>
