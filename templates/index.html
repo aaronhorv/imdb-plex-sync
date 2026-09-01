@@ -172,6 +172,25 @@
             background: #d4edda;
             border: 2px solid #28a745;
         }
+
+        .status-banner.failed {
+            background: #f8d7da;
+            border: 2px solid #dc3545;
+        }
+
+        .sync-error {
+            display: none;
+            margin-bottom: 20px;
+            padding: 12px 16px;
+            color: #721c24;
+            background: #f8d7da;
+            border: 1px solid #dc3545;
+            border-radius: 6px;
+        }
+
+        .sync-error.active {
+            display: block;
+        }
         
         .status-item {
             text-align: center;
@@ -461,6 +480,7 @@
                         <div class="status-value" id="removed" style="color: #dc3545;">0</div>
                     </div>
                 </div>
+                <div class="sync-error" id="syncError"></div>
             </div>
             
             <div class="card">
@@ -998,17 +1018,19 @@
         
         async function checkSyncStatus() {
             const logs = await fetch('/api/logs').then(r => r.json()).catch(() => []);
-            const recentLogs = logs.slice(-10);
+            const recentLogs = logs.slice(0, 20);
             
-            // Check if sync is complete
-            const hasCompleteMessage = recentLogs.some(log => 
-                log.message.includes('Complete:') || 
-                log.message.includes('processed')
-            );
-            
-            const hasStartMessage = recentLogs.some(log => 
+            const startIndex = recentLogs.findIndex(log =>
                 log.message.includes('Starting sync')
             );
+            const terminalIndex = recentLogs.findIndex(log =>
+                log.message.includes('Complete:') ||
+                log.message.includes('processed') ||
+                log.message.includes('sync aborted')
+            );
+            const hasStartMessage = startIndex !== -1;
+            const hasCompleteMessage = terminalIndex !== -1 &&
+                (startIndex === -1 || terminalIndex < startIndex);
             
             if (isSyncing && hasCompleteMessage) {
                 isSyncing = false;
@@ -1060,7 +1082,17 @@
                 
                 // Update banner style
                 const banner = document.getElementById('statusBanner');
-                if (status.processed > 0) {
+                const syncError = document.getElementById('syncError');
+                banner.classList.remove('success', 'failed');
+                if (status.status === 'failed') {
+                    banner.classList.add('failed');
+                    syncError.textContent = `${status.error || 'Latest sync failed.'} Results below are from the previous successful sync.`;
+                    syncError.classList.add('active');
+                } else {
+                    syncError.textContent = '';
+                    syncError.classList.remove('active');
+                }
+                if (status.status !== 'failed' && status.processed > 0) {
                     banner.classList.add('success');
                 }
             } catch (error) {

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from app import check_streaming_availability, _provider_matches_service
+from app import ImdbAccessBlockedError, check_streaming_availability, get_imdb_watchlist, _provider_matches_service
 from imdb_scraper import _normalize_imdb_list_url, parse_imdb_csv
 
 
@@ -57,6 +57,31 @@ class StreamingProviderMatchingTests(unittest.TestCase):
 
         self.assertIsNone(available)
         self.assertEqual(providers, [])
+
+
+class ImdbCacheSafetyTests(unittest.TestCase):
+    @patch('app.add_log')
+    @patch('app.load_imdb_items_cache')
+    @patch('app.get_imdb_export_data')
+    @patch('app.scrape_imdb_watchlist')
+    @patch('app.load_config')
+    def test_stale_cache_is_not_returned_as_fresh_data(
+        self,
+        mock_config,
+        mock_scrape,
+        mock_fallback,
+        mock_cache,
+        _mock_log,
+    ):
+        mock_config.return_value = {'imdbCookie': 'cookie'}
+        mock_scrape.side_effect = ImdbAccessBlockedError('blocked')
+        mock_fallback.return_value = []
+        mock_cache.return_value = [{'imdb_id': 'tt0000001', 'title': 'Cached'}]
+
+        items = get_imdb_watchlist('https://www.imdb.com/user/ur123/watchlist/')
+
+        self.assertEqual(items, [])
+        mock_cache.assert_called_once()
 
 
 if __name__ == '__main__':

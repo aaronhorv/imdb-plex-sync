@@ -109,7 +109,7 @@ def load_imdb_items_cache(list_url):
         if not isinstance(items, list):
             return []
         saved_at = cache.get('saved_at', 'unknown time')
-        add_log(f"Using cached IMDB watchlist from {saved_at}: {len(items)} items", 'warning')
+        add_log(f"Cached IMDB watchlist available from {saved_at}: {len(items)} items", 'warning')
         return items
     except Exception as e:
         add_log(f"Could not read cached IMDB watchlist: {str(e)}", 'warning')
@@ -458,10 +458,9 @@ def get_imdb_watchlist(list_url):
         cached_items = load_imdb_items_cache(list_url)
         if cached_items:
             add_log(
-                "Continuing with cached IMDB watchlist; additions made after the cache timestamp will be missing",
+                "Cached IMDB watchlist will not be used because it may omit newer additions",
                 'warning'
             )
-            return cached_items
         return []
         
     except Exception as e:
@@ -1439,7 +1438,16 @@ def sync_watchlist():
         add_log(f"IMDB List URL: {config['imdbListUrl']}", 'info')
         items = get_imdb_watchlist(config['imdbListUrl'])
         if not items:
-            add_log("No items found in IMDB watchlist", 'warning')
+            error_message = "Fresh IMDb watchlist data is unavailable; sync aborted and Plex was not changed"
+            previous_stats = load_sync_stats()
+            save_sync_stats({
+                'removed': previous_stats.get('removed', 0),
+                'last_sync': previous_stats.get('last_sync'),
+                'last_attempt': datetime.now().isoformat(),
+                'status': 'failed',
+                'error': error_message,
+            })
+            add_log(error_message, 'error')
             return
         add_log(f"Found {len(items)} items in IMDB watchlist", 'info')
 
@@ -1579,7 +1587,10 @@ def sync_watchlist():
     save_sync_results(results)
     save_sync_stats({
         'removed': removed,
-        'last_sync': datetime.now().isoformat()
+        'last_sync': datetime.now().isoformat(),
+        'last_attempt': datetime.now().isoformat(),
+        'status': 'completed',
+        'error': None,
     })
 
     add_log("=" * 50, 'info')
@@ -1770,7 +1781,9 @@ def get_status():
     if not results:
         return jsonify({
             'lastSync': stats.get('last_sync'),
-            'status': 'idle',
+            'lastAttempt': stats.get('last_attempt'),
+            'status': stats.get('status', 'idle'),
+            'error': stats.get('error'),
             'processed': 0,
             'added': 0,
             'skipped': 0,
@@ -1783,7 +1796,9 @@ def get_status():
 
     return jsonify({
         'lastSync': stats.get('last_sync', datetime.now().isoformat()),
-        'status': 'completed',
+        'lastAttempt': stats.get('last_attempt'),
+        'status': stats.get('status', 'completed'),
+        'error': stats.get('error'),
         'processed': len(results),
         'added': added,
         'skipped': skipped,
