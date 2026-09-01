@@ -76,7 +76,7 @@ Choose your source from the dropdown:
 
 | Source | What you need |
 |--------|--------------|
-| **IMDB** | Your IMDB watchlist or list URL (must be public) |
+| **IMDB** | Your IMDB watchlist or list URL; authenticated lists can use an IMDb Cookie header |
 | **TMDB List** | A TMDB list ID |
 | **TMDB Watchlist** | TMDB Session ID + Account ID (auth flow built in) |
 | **Trakt** | Trakt watchlist URL + Client ID + Client Secret (OAuth built in) |
@@ -120,6 +120,8 @@ Config is preserved in `./config/`.
 
 **IMDB: fewer items than expected**
 - Make sure your watchlist is set to public
+- For authenticated lists, paste a full IMDb request `Cookie` header in Configuration. It seeds a persistent Chromium profile under `./config/imdb-browser-profile`; the profile is reused on later syncs and survives container rebuilds.
+- If IMDb shows Human Verification, solve it in a normal browser and refresh the configured Cookie header once. The app does not bypass IMDb challenges.
 - Check Docker logs: `docker logs watchlist-plex-sync`
 
 **TMDB 401 errors**

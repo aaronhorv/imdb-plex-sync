@@ -1,8 +1,22 @@
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from app import ImdbAccessBlockedError, check_streaming_availability, get_imdb_watchlist, _provider_matches_service
-from imdb_scraper import _normalize_imdb_list_url, parse_imdb_csv
+from imdb_scraper import _normalize_imdb_list_url, _seed_imdb_profile_cookies, parse_imdb_csv
+
+
+class FakeBrowserContext:
+    def __init__(self):
+        self.cookie_jar = []
+        self.add_calls = 0
+
+    def cookies(self, _url):
+        return self.cookie_jar
+
+    def add_cookies(self, cookies):
+        self.cookie_jar = cookies
+        self.add_calls += 1
 
 
 class ImdbCsvOrderingTests(unittest.TestCase):
@@ -26,6 +40,45 @@ tt0000003,Middle title,2026-01-15
             _normalize_imdb_list_url(url),
             f'{url}?sort=date_added%2Cdesc',
         )
+
+
+class ImdbPersistentProfileTests(unittest.TestCase):
+    def test_cookie_seeds_profile_only_once_when_unchanged(self):
+        context = FakeBrowserContext()
+        cookie = 'session-id=123; at-main=authenticated'
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            self.assertTrue(_seed_imdb_profile_cookies(context, profile_dir, cookie))
+            self.assertFalse(_seed_imdb_profile_cookies(context, profile_dir, cookie))
+
+        self.assertEqual(context.add_calls, 1)
+
+    def test_changed_cookie_refreshes_profile(self):
+        context = FakeBrowserContext()
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            _seed_imdb_profile_cookies(
+                context,
+                profile_dir,
+                'session-id=123; at-main=first',
+            )
+            self.assertTrue(
+                _seed_imdb_profile_cookies(
+                    context,
+                    profile_dir,
+                    'session-id=456; at-main=second',
+                )
+            )
+
+        self.assertEqual(context.add_calls, 2)
+
+    def test_profile_can_run_without_configured_cookie(self):
+        context = FakeBrowserContext()
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            self.assertFalse(_seed_imdb_profile_cookies(context, profile_dir, ''))
+
+        self.assertEqual(context.add_calls, 0)
 
 
 class StreamingProviderMatchingTests(unittest.TestCase):

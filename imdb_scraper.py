@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import os
 import re
+import threading
 import time
 from datetime import datetime
 from http.cookies import SimpleCookie
@@ -20,6 +23,8 @@ MAX_SCROLL_ATTEMPTS = 80
 MAX_STAGNANT_SCROLLS = 6
 MAX_PAGINATION_PAGES = 250
 DOWNLOAD_TIMEOUT_MS = 120_000
+DEFAULT_BROWSER_PROFILE_DIR = "/config/imdb-browser-profile"
+IMDB_PROFILE_LOCK = threading.Lock()
 
 ID_COLUMNS = ("Const", "IMDb ID", "Title ID", "URL")
 TITLE_COLUMNS = ("Title", "Original Title", "Title Name")
@@ -41,6 +46,7 @@ class ImdbAccessBlockedError(RuntimeError):
 def scrape_imdb_watchlist(
     list_url: str,
     imdb_cookie: str = "",
+    browser_profile_dir: str | None = None,
     logger=None,
 ) -> list[dict]:
     """Scrape an IMDb watchlist or custom list URL.
@@ -52,7 +58,8 @@ def scrape_imdb_watchlist(
 
     Args:
         list_url: IMDb watchlist or list URL to scrape.
-        imdb_cookie: Optional IMDb ``at-main`` value or full Cookie header.
+        imdb_cookie: Optional IMDb cookie header used to seed or refresh the profile.
+        browser_profile_dir: Persistent Chromium profile directory.
         logger: Optional callable logger. Supports ``logger(message)`` and
             ``logger(message, level)`` styles.
 
@@ -68,6 +75,11 @@ def scrape_imdb_watchlist(
     if normalized_list_url != list_url:
         _log(logger, f"IMDb normalized list URL: {normalized_list_url}", "info")
     list_url = normalized_list_url
+    browser_profile_dir = browser_profile_dir or os.environ.get(
+        "IMDB_BROWSER_PROFILE_DIR",
+        DEFAULT_BROWSER_PROFILE_DIR,
+    )
+    os.makedirs(browser_profile_dir, exist_ok=True)
 
     structured_items: list[dict[str, str]] = []
 
@@ -95,34 +107,35 @@ def scrape_imdb_watchlist(
 
     _log(logger, "Opening IMDb page with Playwright", "info")
 
-    browser = None
     context = None
     page = None
+    profile_locked = False
 
     try:
+        profile_locked = IMDB_PROFILE_LOCK.acquire(timeout=300)
+        if not profile_locked:
+            raise RuntimeError("Timed out waiting for the IMDb browser profile")
+
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
+            _log(logger, f"IMDb persistent browser profile: {browser_profile_dir}", "info")
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=browser_profile_dir,
                 headless=True,
+                accept_downloads=True,
+                locale="en-US",
                 args=[
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                 ],
             )
-            context = browser.new_context(
-                accept_downloads=True,
-                locale="en-US",
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
+            _seed_imdb_profile_cookies(
+                context,
+                browser_profile_dir,
+                imdb_cookie,
+                logger,
             )
 
-            imdb_cookies = parse_imdb_cookie_string(imdb_cookie)
-            if imdb_cookies:
-                context.add_cookies(imdb_cookies)
-                _log(logger, f"IMDb cookie authentication enabled ({len(imdb_cookies)} cookies)", "info")
-
-            page = context.new_page()
+            page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
             page.on("response", handle_response)
 
@@ -169,13 +182,15 @@ def scrape_imdb_watchlist(
         _log(logger, f"IMDb Playwright scraping error: {exc}", "error")
         raise
     finally:
-        for resource in (page, context, browser):
+        for resource in (page, context):
             if resource is None:
                 continue
             try:
                 resource.close()
             except Exception:
                 pass
+        if profile_locked:
+            IMDB_PROFILE_LOCK.release()
 
 
 def parse_imdb_csv(csv_text: str, logger=None) -> list[dict]:
@@ -269,6 +284,44 @@ def parse_imdb_cookie_string(cookie_value: str) -> list[dict[str, Any]]:
         }
         for name, value in parsed.items()
     ]
+
+
+def _seed_imdb_profile_cookies(context, profile_dir: str, cookie_value: str, logger=None) -> bool:
+    imdb_cookies = parse_imdb_cookie_string(cookie_value)
+    if not imdb_cookies:
+        _log(logger, "IMDb persistent profile will be used without a cookie refresh", "info")
+        return False
+
+    cookie_fingerprint = hashlib.sha256(cookie_value.strip().encode("utf-8")).hexdigest()
+    marker_path = os.path.join(profile_dir, ".cookie-seed.sha256")
+    previous_fingerprint = ""
+    try:
+        with open(marker_path, "r", encoding="ascii") as marker:
+            previous_fingerprint = marker.read().strip()
+    except OSError:
+        pass
+
+    try:
+        profile_cookie_names = {
+            cookie.get("name")
+            for cookie in context.cookies("https://www.imdb.com")
+        }
+    except Exception:
+        profile_cookie_names = set()
+
+    has_authentication = bool(profile_cookie_names & {"at-main", "session-id", "session-token"})
+    if previous_fingerprint == cookie_fingerprint and has_authentication:
+        _log(logger, "IMDb authentication loaded from the persistent browser profile", "info")
+        return False
+
+    context.add_cookies(imdb_cookies)
+    try:
+        with open(marker_path, "w", encoding="ascii") as marker:
+            marker.write(cookie_fingerprint)
+    except OSError as exc:
+        _log(logger, f"Could not save IMDb cookie refresh marker: {exc}", "warning")
+    _log(logger, f"IMDb persistent profile refreshed with {len(imdb_cookies)} configured cookies", "info")
+    return True
 
 
 def _scrape_via_csv_export(page: Page, logger) -> tuple[list[dict], str]:
