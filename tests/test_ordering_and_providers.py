@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from app import ImdbAccessBlockedError, check_streaming_availability, get_imdb_watchlist, _provider_matches_service
 from imdb_scraper import (
     PERSONAL_WATCHLIST_URL,
+    _detect_interstitials,
     _normalize_imdb_list_url,
     _scrape_via_csv_export,
     _seed_imdb_profile_cookies,
@@ -124,6 +125,16 @@ class ImdbExportNavigationTests(unittest.TestCase):
         export_control.click.assert_called_once_with(timeout=10_000)
         self.assertEqual(mode, 'direct download')
         self.assertEqual(items[0]['imdb_id'], 'tt1234567')
+
+    def test_forbidden_page_is_detected_as_an_error(self):
+        body = MagicMock()
+        body.inner_text.return_value = '403 Forbidden'
+        page = MagicMock()
+        page.url = PERSONAL_WATCHLIST_URL
+        page.title.return_value = '403 Forbidden'
+        page.locator.return_value = body
+
+        self.assertIn('error', _detect_interstitials(page, None))
 
 
 class StreamingProviderMatchingTests(unittest.TestCase):

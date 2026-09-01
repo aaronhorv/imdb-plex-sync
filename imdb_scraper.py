@@ -27,6 +27,11 @@ DIRECT_DOWNLOAD_TIMEOUT_MS = 15_000
 EXPORT_STATUS_URL = "https://www.imdb.com/exports/"
 PERSONAL_WATCHLIST_URL = "https://www.imdb.com/list/watchlist?sort=date_added%2Cdesc"
 DEFAULT_BROWSER_PROFILE_DIR = "/config/imdb-browser-profile"
+DEFAULT_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/137.0.0.0 Safari/537.36"
+)
 IMDB_PROFILE_LOCK = threading.Lock()
 
 ID_COLUMNS = ("Const", "IMDb ID", "Title ID", "URL")
@@ -126,9 +131,17 @@ def scrape_imdb_watchlist(
                 headless=True,
                 accept_downloads=True,
                 locale="en-US",
+                user_agent=os.environ.get("IMDB_BROWSER_USER_AGENT", DEFAULT_BROWSER_USER_AGENT),
+                viewport={"width": 1920, "height": 1080},
+                ignore_default_args=["--enable-automation"],
                 args=[
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-notifications",
+                    "--disable-third-party-cookies",
+                    "--disable-extensions",
+                    "--window-size=1920,1080",
                 ],
             )
             _seed_imdb_profile_cookies(
@@ -859,8 +872,8 @@ def _detect_interstitials(page: Page, logger) -> list[str]:
         ),
         "error": (
             (),
-            ("404", "not found", "unavailable"),
-            ("page not found", "this page could not be found"),
+            ("403", "404", "forbidden", "access denied", "not found", "unavailable"),
+            ("403 forbidden", "access denied", "page not found", "this page could not be found"),
         ),
     }
 
@@ -890,7 +903,10 @@ def _raise_for_blocking_interstitial(page: Page, logger) -> None:
     elif "consent" in blocking_labels:
         guidance = "IMDb is showing a consent page. Accept it in a browser, then update the IMDb Cookie setting with fresh cookies."
     else:
-        guidance = "IMDb is showing an error page instead of the configured list. Check that the list URL is correct and accessible."
+        guidance = (
+            "IMDb rejected the browser request or returned an error page. "
+            "The saved session may need to be refreshed from a successful IMDb login."
+        )
 
     raise ImdbAccessBlockedError(f"IMDb access blocked by {label_text} page. {guidance}")
 
