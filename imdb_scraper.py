@@ -23,6 +23,9 @@ MAX_SCROLL_ATTEMPTS = 80
 MAX_STAGNANT_SCROLLS = 6
 MAX_PAGINATION_PAGES = 250
 DOWNLOAD_TIMEOUT_MS = 120_000
+DIRECT_DOWNLOAD_TIMEOUT_MS = 15_000
+EXPORT_STATUS_URL = "https://www.imdb.com/exports/"
+PERSONAL_WATCHLIST_URL = "https://www.imdb.com/list/watchlist?sort=date_added%2Cdesc"
 DEFAULT_BROWSER_PROFILE_DIR = "/config/imdb-browser-profile"
 IMDB_PROFILE_LOCK = threading.Lock()
 
@@ -326,6 +329,14 @@ def _seed_imdb_profile_cookies(context, profile_dir: str, cookie_value: str, log
 
 def _scrape_via_csv_export(page: Page, logger) -> tuple[list[dict], str]:
     export_control = _find_export_control(page, logger)
+    if export_control is None and "/watchlist" in page.url.lower():
+        _log(logger, f"IMDb opening authenticated watchlist export page: {PERSONAL_WATCHLIST_URL}", "info")
+        page.goto(PERSONAL_WATCHLIST_URL, wait_until="domcontentloaded", timeout=60_000)
+        _wait_for_page_settle(page, logger)
+        _log_page_diagnostics(page, logger)
+        _raise_for_blocking_interstitial(page, logger)
+        export_control = _find_export_control(page, logger)
+
     if export_control is None:
         _log(logger, "IMDb Export control found: no", "info")
         raise ImdbExportUnavailable("Export control was not found")
@@ -333,7 +344,7 @@ def _scrape_via_csv_export(page: Page, logger) -> tuple[list[dict], str]:
     _log(logger, "IMDb Export control found: yes", "info")
 
     try:
-        with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
+        with page.expect_download(timeout=DIRECT_DOWNLOAD_TIMEOUT_MS) as download_info:
             export_control.click(timeout=10_000)
         download = download_info.value
         _log(logger, "IMDb CSV download started: yes", "info")
@@ -342,24 +353,20 @@ def _scrape_via_csv_export(page: Page, logger) -> tuple[list[dict], str]:
         csv_text = _read_download_text(download)
         return parse_imdb_csv(csv_text, logger), "direct download"
     except PlaywrightTimeoutError:
-        _log(logger, "IMDb CSV download started: no", "warning")
+        _log(logger, "IMDb CSV download started directly: no; checking asynchronous exports", "info")
 
-    generated_download = _wait_for_generated_download_link(page, logger)
-    if generated_download is None:
-        raise ImdbExportUnavailable("Export did not produce a direct download or generated download link")
-
-    with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
-        generated_download.click(timeout=10_000)
-    download = download_info.value
+    download = _wait_for_watchlist_export_download(page, logger)
     filename = download.suggested_filename or "imdb-export.csv"
-    _log(logger, "IMDb CSV download started from generated link: yes", "info")
+    _log(logger, "IMDb CSV download started from asynchronous export: yes", "info")
     _log(logger, f"IMDb CSV filename: {filename}", "info")
     csv_text = _read_download_text(download)
-    return parse_imdb_csv(csv_text, logger), "generated download link"
+    return parse_imdb_csv(csv_text, logger), "asynchronous export job"
 
 
 def _find_export_control(page: Page, logger):
     selectors = [
+        'div[data-testid*="hero-list-subnav-export-button"] button',
+        'button[data-testid*="hero-list-subnav-export-button"]',
         'a[download]',
         'a[href*="export" i]',
         'button[aria-label*="Export" i]',
@@ -372,8 +379,15 @@ def _find_export_control(page: Page, logger):
         '[role="menuitem"]:has-text("Export")',
     ]
 
-    for selector in selectors:
+    for index, selector in enumerate(selectors):
         locator = page.locator(selector)
+        if index < 2:
+            try:
+                locator.nth(0).wait_for(state="visible", timeout=10_000)
+                _log(logger, f"IMDb Export selector matched: {selector}", "info")
+                return locator.nth(0)
+            except Exception:
+                continue
         try:
             count = locator.count()
         except Exception:
@@ -415,31 +429,53 @@ def _find_export_control(page: Page, logger):
     return None
 
 
-def _wait_for_generated_download_link(page: Page, logger):
-    _log(logger, "Waiting for generated IMDb export download link", "info")
-    deadline = time.monotonic() + 90
-    selectors = [
-        'a[download]',
-        'a[href*="export" i]',
-        'a[href*="csv" i]',
-        'a:has-text("Download")',
-        'button:has-text("Download")',
-    ]
+def _wait_for_watchlist_export_download(page: Page, logger):
+    _log(logger, f"IMDb polling asynchronous exports page: {EXPORT_STATUS_URL}", "info")
+    deadline = time.monotonic() + (DOWNLOAD_TIMEOUT_MS / 1000)
 
     while time.monotonic() < deadline:
+        page.goto(EXPORT_STATUS_URL, wait_until="domcontentloaded", timeout=60_000)
+        _wait_for_page_settle(page, logger)
         _raise_for_blocking_interstitial(page, logger)
-        for selector in selectors:
-            locator = page.locator(selector)
+
+        export_rows = page.locator(".ipc-metadata-list-summary-item")
+        try:
+            row_count = export_rows.count()
+        except Exception:
+            row_count = 0
+
+        _log(logger, f"IMDb exports page contains {row_count} export rows", "info")
+        for index in range(row_count):
+            row = export_rows.nth(index)
             try:
-                if locator.count():
-                    _log(logger, f"IMDb generated download link found with selector: {selector}", "info")
-                    return locator.nth(0)
+                row_text = row.inner_text(timeout=2_000)
             except Exception:
                 continue
-        page.wait_for_timeout(2_000)
+            if "watchlist" not in row_text.lower():
+                continue
+            if "in progress" in row_text.lower():
+                _log(logger, "IMDb watchlist export is still in progress", "info")
+                break
 
-    _log(logger, "IMDb generated download link was not found before timeout", "warning")
-    return None
+            download_control = row.locator(
+                'button[data-testid*="export-status-button"], '
+                'a[download], a[href*="csv" i], '
+                'button:has-text("Download"), a:has-text("Download")'
+            )
+            try:
+                if not download_control.count():
+                    _log(logger, "IMDb watchlist export row is ready but has no download control", "warning")
+                    break
+                with page.expect_download(timeout=30_000) as download_info:
+                    download_control.nth(0).click(timeout=10_000)
+                return download_info.value
+            except PlaywrightTimeoutError:
+                _log(logger, "IMDb watchlist export control did not start a download", "warning")
+                break
+
+        page.wait_for_timeout(5_000)
+
+    raise ImdbExportUnavailable("IMDb watchlist export did not become downloadable before timeout")
 
 
 def _read_download_text(download) -> str:

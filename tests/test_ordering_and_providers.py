@@ -1,9 +1,15 @@
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app import ImdbAccessBlockedError, check_streaming_availability, get_imdb_watchlist, _provider_matches_service
-from imdb_scraper import _normalize_imdb_list_url, _seed_imdb_profile_cookies, parse_imdb_csv
+from imdb_scraper import (
+    PERSONAL_WATCHLIST_URL,
+    _normalize_imdb_list_url,
+    _scrape_via_csv_export,
+    _seed_imdb_profile_cookies,
+    parse_imdb_csv,
+)
 
 
 class FakeBrowserContext:
@@ -79,6 +85,45 @@ class ImdbPersistentProfileTests(unittest.TestCase):
             self.assertFalse(_seed_imdb_profile_cookies(context, profile_dir, ''))
 
         self.assertEqual(context.add_calls, 0)
+
+
+class ImdbExportNavigationTests(unittest.TestCase):
+    @patch('imdb_scraper._read_download_text')
+    @patch('imdb_scraper._raise_for_blocking_interstitial')
+    @patch('imdb_scraper._log_page_diagnostics')
+    @patch('imdb_scraper._wait_for_page_settle')
+    @patch('imdb_scraper._find_export_control')
+    def test_missing_public_export_uses_authenticated_watchlist_page(
+        self,
+        mock_find_export,
+        _mock_settle,
+        _mock_diagnostics,
+        _mock_interstitial,
+        mock_read_download,
+    ):
+        export_control = MagicMock()
+        mock_find_export.side_effect = [None, export_control]
+        mock_read_download.return_value = 'Const,Title\ntt1234567,Example\n'
+
+        download = MagicMock(suggested_filename='watchlist.csv')
+        download_context = MagicMock()
+        download_context.__enter__.return_value = download_context
+        download_context.value = download
+
+        page = MagicMock()
+        page.url = 'https://www.imdb.com/user/p.example/watchlist/'
+        page.expect_download.return_value = download_context
+
+        items, mode = _scrape_via_csv_export(page, None)
+
+        page.goto.assert_called_once_with(
+            PERSONAL_WATCHLIST_URL,
+            wait_until='domcontentloaded',
+            timeout=60_000,
+        )
+        export_control.click.assert_called_once_with(timeout=10_000)
+        self.assertEqual(mode, 'direct download')
+        self.assertEqual(items[0]['imdb_id'], 'tt1234567')
 
 
 class StreamingProviderMatchingTests(unittest.TestCase):
