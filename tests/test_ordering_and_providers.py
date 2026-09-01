@@ -12,6 +12,8 @@ from app import (
 from imdb_scraper import (
     PERSONAL_WATCHLIST_URL,
     _detect_interstitials,
+    _extract_structured_items,
+    _merge_items,
     _normalize_imdb_list_url,
     _scrape_via_csv_export,
     _seed_imdb_profile_cookies,
@@ -163,6 +165,64 @@ class ImdbExportNavigationTests(unittest.TestCase):
         page.locator.return_value = body
 
         self.assertIn('error', _detect_interstitials(page, None))
+
+
+class ImdbStructuredExtractionTests(unittest.TestCase):
+    def test_only_title_list_connection_items_are_extracted(self):
+        payload = {
+            'data': {
+                'mainColumnData': {
+                    'predefinedList': {
+                        'titleListItemSearch': {
+                            'edges': [
+                                {
+                                    'node': {
+                                        'title': {
+                                            'id': 'tt1234567',
+                                            'titleText': {'text': 'Watchlist title'},
+                                        },
+                                        'created': '2026-08-31',
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                'recentlyViewed': {
+                    'edges': [
+                        {'node': {'id': 'tt9999999', 'titleText': {'text': 'Viewed only'}}}
+                    ]
+                },
+            }
+        }
+
+        items = _extract_structured_items(payload)
+
+        self.assertEqual([item['imdb_id'] for item in items], ['tt1234567'])
+        self.assertEqual(items[0]['title'], 'Watchlist title')
+        self.assertEqual(items[0]['date_added'], '2026-08-31')
+
+    def test_recently_viewed_payload_is_ignored(self):
+        payload = {
+            'data': {
+                'recentlyViewed': {
+                    'edges': [{'node': {'id': 'tt9999999'}}]
+                }
+            }
+        }
+
+        self.assertEqual(_extract_structured_items(payload), [])
+
+    def test_structured_dates_are_preserved_and_sorted_newest_first(self):
+        items = _merge_items(
+            [],
+            [
+                {'imdb_id': 'tt0000001', 'title': 'Old', 'date_added': '2025-01-01'},
+                {'imdb_id': 'tt0000002', 'title': 'New', 'date_added': '2026-08-31'},
+            ],
+        )
+
+        self.assertEqual([item['imdb_id'] for item in items], ['tt0000002', 'tt0000001'])
 
 
 class StreamingProviderMatchingTests(unittest.TestCase):

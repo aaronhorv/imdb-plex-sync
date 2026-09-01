@@ -37,6 +37,10 @@ IMDB_PROFILE_LOCK = threading.Lock()
 ID_COLUMNS = ("Const", "IMDb ID", "Title ID", "URL")
 TITLE_COLUMNS = ("Title", "Original Title", "Title Name")
 DATE_ADDED_COLUMNS = ("Created", "Date Added", "Added", "Created At")
+WATCHLIST_TITLE_LINK_SELECTOR = (
+    '[data-testid*="title-list-item"] a[href*="/title/tt"], '
+    '.ipc-metadata-list-summary-item a[href*="/title/tt"]'
+)
 
 
 class ImdbExportUnavailable(RuntimeError):
@@ -920,7 +924,7 @@ def _wait_for_page_settle(page: Page, logger) -> None:
 
 def _wait_for_initial_titles(page: Page, logger) -> None:
     try:
-        page.wait_for_selector('a[href*="/title/tt"]', timeout=15_000)
+        page.wait_for_selector(WATCHLIST_TITLE_LINK_SELECTOR, timeout=15_000)
     except PlaywrightTimeoutError:
         _log(logger, "IMDb title links were not visible after initial load", "warning")
 
@@ -989,8 +993,29 @@ def _collect_dom_items(page: Page) -> list[dict[str, str]]:
             return "";
           };
 
+          const scopedSelector = [
+            '[data-testid*="title-list-item"] a[href*="/title/tt"]',
+            '.ipc-metadata-list-summary-item a[href*="/title/tt"]'
+          ].join(', ');
+          let links = Array.from(document.querySelectorAll(scopedSelector));
+
+          if (!links.length) {
+            links = Array.from(document.querySelectorAll('a[href*="/title/tt"]')).filter((link) => {
+              const section = link.closest('section, [data-testid*="section"]');
+              if (!section) return true;
+              const heading = section.querySelector('h1, h2, h3, [role="heading"]');
+              const sectionLabel = cleanTitle(
+                (heading && (heading.innerText || heading.textContent)) ||
+                section.getAttribute('aria-label') ||
+                section.getAttribute('data-testid') ||
+                ''
+              );
+              return !/recently viewed/i.test(sectionLabel);
+            });
+          }
+
           const items = [];
-          for (const link of document.querySelectorAll('a[href*="/title/tt"]')) {
+          for (const link of links) {
             const href = link.getAttribute("href") || "";
             const match = href.match(titlePattern);
             if (!match) continue;
@@ -1006,26 +1031,100 @@ def _collect_dom_items(page: Page) -> list[dict[str, str]]:
 
 
 def _extract_structured_items(data: Any) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
+    """Extract only IMDb title-list connection entries, excluding page recommendations."""
+    connections: list[Any] = []
 
-    def walk(obj: Any) -> None:
+    def find_connections(obj: Any) -> None:
         if isinstance(obj, dict):
-            imdb_id = _find_id_in_dict(obj)
-            title = _find_title_in_dict(obj)
-            if imdb_id:
-                items.append({"imdb_id": imdb_id, "title": title or ""})
-
-            for value in obj.values():
-                walk(value)
+            for key, value in obj.items():
+                if str(key).lower() == "titlelistitemsearch":
+                    connections.append(value)
+                else:
+                    find_connections(value)
         elif isinstance(obj, list):
             for value in obj:
-                walk(value)
-        elif isinstance(obj, str):
-            for imdb_id in IMDB_ID_RE.findall(obj):
-                items.append({"imdb_id": imdb_id, "title": ""})
+                find_connections(value)
 
-    walk(data)
+    find_connections(data)
+
+    items: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for connection in connections:
+        entries = []
+        if isinstance(connection, dict):
+            for key in ("edges", "items", "results"):
+                value = connection.get(key)
+                if isinstance(value, list):
+                    entries = value
+                    break
+        elif isinstance(connection, list):
+            entries = connection
+
+        for entry in entries:
+            candidate = entry.get("node", entry) if isinstance(entry, dict) else entry
+            imdb_id = _find_id_in_tree(candidate)
+            if not imdb_id or imdb_id in seen_ids:
+                continue
+            seen_ids.add(imdb_id)
+            item = {"imdb_id": imdb_id, "title": _find_title_in_tree(candidate)}
+            date_added = _find_date_added_in_tree(candidate)
+            if date_added:
+                item["date_added"] = date_added
+            items.append(item)
+
     return items
+
+
+def _find_id_in_tree(obj: Any) -> str:
+    if isinstance(obj, dict):
+        imdb_id = _find_id_in_dict(obj)
+        if imdb_id:
+            return imdb_id
+        for value in obj.values():
+            imdb_id = _find_id_in_tree(value)
+            if imdb_id:
+                return imdb_id
+    elif isinstance(obj, list):
+        for value in obj:
+            imdb_id = _find_id_in_tree(value)
+            if imdb_id:
+                return imdb_id
+    return ""
+
+
+def _find_title_in_tree(obj: Any) -> str:
+    if isinstance(obj, dict):
+        title = _find_title_in_dict(obj)
+        if title:
+            return title
+        for value in obj.values():
+            title = _find_title_in_tree(value)
+            if title:
+                return title
+    elif isinstance(obj, list):
+        for value in obj:
+            title = _find_title_in_tree(value)
+            if title:
+                return title
+    return ""
+
+
+def _find_date_added_in_tree(obj: Any) -> str:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            normalized_key = str(key).replace("_", "").lower()
+            if normalized_key in {"created", "createdat", "dateadded", "addedat"} and value:
+                return str(value)
+        for value in obj.values():
+            date_added = _find_date_added_in_tree(value)
+            if date_added:
+                return date_added
+    elif isinstance(obj, list):
+        for value in obj:
+            date_added = _find_date_added_in_tree(value)
+            if date_added:
+                return date_added
+    return ""
 
 
 def _find_id_in_dict(obj: dict) -> str:
@@ -1106,4 +1205,16 @@ def _merge_items(dom_items: list[dict[str, str]], structured_items: list[dict[st
         elif title and merged[imdb_id]["title"] == f"IMDB:{imdb_id}":
             merged[imdb_id]["title"] = title
 
-    return list(merged.values())
+        date_added = item.get("date_added")
+        if date_added:
+            merged[imdb_id]["date_added"] = date_added
+
+    items = list(merged.values())
+    if any(_date_sort_value(item.get("date_added", "")) is not None for item in items):
+        items.sort(
+            key=lambda item: (
+                _date_sort_value(item.get("date_added", "")) is None,
+                -(_date_sort_value(item.get("date_added", "")) or 0),
+            )
+        )
+    return items
